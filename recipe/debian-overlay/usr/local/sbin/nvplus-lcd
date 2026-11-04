@@ -398,6 +398,19 @@ class Panel:
                     return None
         return None
 
+    def disconnect_keys(self):
+        # Lost release events must never leave a shutdown/reboot hold armed.
+        if self.keys is not None:
+            try:
+                os.close(self.keys)
+            except OSError:
+                pass
+        self.keys = None
+        self.next_keys = 0.0
+        self.held.clear()
+        self.fired.clear()
+        self.countdown = False
+
     def on_key(self, code, value, now):
         if code not in HOLD or self.final:
             return
@@ -432,6 +445,8 @@ class Panel:
         self.tick(now, force=True)
 
     def check_holds(self, now):
+        if self.final:
+            return
         if self.paused or os.path.exists(PAUSE_FILE):
             self.fired.update(self.held)  # Never defer a destructive hold across a demo.
             self.countdown = False
@@ -534,11 +549,13 @@ class Panel:
             if ready:
                 try:
                     data = os.read(self.keys, EVENT.size * 32)
+                    if not data:
+                        self.disconnect_keys()
                 except BlockingIOError:
                     data = b''
                 except OSError:
-                    os.close(self.keys)
-                    self.keys, data = None, b''
+                    self.disconnect_keys()
+                    data = b''
                 now = time.monotonic()
                 for off in range(0, len(data) - EVENT.size + 1, EVENT.size):
                     _, _, typ, code, value = EVENT.unpack_from(data, off)

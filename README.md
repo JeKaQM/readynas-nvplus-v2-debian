@@ -73,8 +73,9 @@ runs:
 | Front panel | Rotating LCD status, ten-minute sleep, wake-only first button press, RAID/warning LEDs | `nvplus-lcd` |
 
 The original blue LEDs, four bays, Gigabit port, 2×16 LCD and GPIO buttons are used. The LCD and demo
-were confirmed on the real unit. The panel's button timing is software-tested; physical button-triggered
-shutdown/reboot and the new idle/wake behaviour still need owner confirmation. `systemctl poweroff`
+were confirmed on the real unit. Automatic ten-minute sleep was logged and the owner confirmed the
+screen wakes on a button press. This does not establish every button/hold mapping: physical button-triggered
+shutdown/reboot remains untested; timing and cancellation are software-tested. `systemctl poweroff`
 is the previously tested shutdown route. See [Front-panel controls](#85-front-panel-controls-and-display-sleep).
 
 ---
@@ -636,9 +637,10 @@ python3 -m unittest discover -s tests -v
 ```
 
 They exercise the 600 s boundary, all three wake-only presses/holds, subsequent deliberate actions,
-cancellation, demo coexistence and continuing warning checks. Passing them is **not** a physical button
-or display test. Test sleep/wake first; do not deliberately reboot during an active RAID rebuild merely
-to test a button. LCD modules must match the running kernel exactly; rebuild with this recipe rather than
+cancellation, demo coexistence, repeated simultaneous holds, input-disconnect cancellation and continuing
+warning checks. The original unit's automatic sleep was logged and its owner confirmed visible wake;
+this does **not** verify every physical button or destructive hold. Do not deliberately reboot during an
+active RAID rebuild merely to test a button. LCD modules must match the running kernel exactly; rebuild with this recipe rather than
 using a module compiled for a different kernel/configuration/symbol versions. `prepare.sh` creates a copy:
 use a fresh prepared tree and clean kernel build after changing the LCD fragment; stale module archives
 without all three LCD drivers are rejected. New installs enable `nvplus-lcd` and install Python 3.

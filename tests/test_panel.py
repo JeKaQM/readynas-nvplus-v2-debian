@@ -19,6 +19,9 @@ class FakeLcd:
         self.ready = True
         self.calls = []
 
+    def write(self, text):
+        self.calls.append(('write', text))
+
     def show(self, *lines):
         self.calls.append(('show', *lines))
 
@@ -41,6 +44,7 @@ class PanelTests(unittest.TestCase):
         self.p.check_alerts = Mock()
         self.p.update_leds = Mock()
         self.p.current = Mock(return_value=('Status', 'OK'))
+        self.p.open_keys = Mock(return_value=None)
 
     def tick(self, now):
         self.p.tick(now, force=True)
@@ -239,7 +243,42 @@ class PanelTests(unittest.TestCase):
         self.p.on_key(panel.KEY_POWER, 1, 10)
         self.p.on_key(panel.KEY_RESTART, 1, 10)
         self.p.check_holds(20)
+        self.p.check_holds(21)
         self.assertEqual(self.popen.call_count, 1)
+
+    def test_input_disconnect_cancels_all_armed_holds(self):
+        self.p.keys = 42
+        self.p.on_key(panel.KEY_POWER, 1, 10)
+        self.p.check_holds(10.6)
+        self.assertTrue(self.p.countdown)
+        with patch.object(panel.os, 'close') as close:
+            self.p.disconnect_keys()
+            close.assert_called_once_with(42)
+        self.p.check_holds(30)
+        self.assertIsNone(self.p.keys)
+        self.assertFalse(self.p.held)
+        self.assertFalse(self.p.fired)
+        self.assertFalse(self.p.countdown)
+        self.popen.assert_not_called()
+
+    def test_disconnect_without_open_device_is_idempotent(self):
+        with patch.object(panel.os, 'close') as close:
+            self.p.disconnect_keys()
+            self.p.disconnect_keys()
+            close.assert_not_called()
+        self.popen.assert_not_called()
+
+    def test_input_eof_clears_hold_in_real_loop_without_hardware(self):
+        self.p.keys = 42
+        self.p.held[panel.KEY_POWER] = -10
+        with patch.object(panel.signal, 'signal'), patch.object(panel.os, 'close') as close, \
+             patch.object(panel.os, 'read', return_value=b''), \
+             patch.object(panel.select, 'select', side_effect=[([42], [], []), RuntimeError('end test loop')]):
+            with self.assertRaisesRegex(RuntimeError, 'end test loop'):
+                self.p.run()
+        close.assert_called_once_with(42)
+        self.assertFalse(self.p.held)
+        self.popen.assert_not_called()
 
 
 if __name__ == '__main__':
