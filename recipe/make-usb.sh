@@ -13,7 +13,7 @@ cp "$I/uImage-nas" "$U/uImage-recovery"; cp "$I/uInitrd-installer" "$U/initrd-re
 P=$U/nas-install/payload
 cp "$I/uImage-nas" "$D/uInitrd-nas" "$I/modules-6.12.115.tar.gz" "$DL/debian-trixie-armel-rootfs.tar.gz" "$DL/webmin_2.670_all.deb" "$P/"
 OV=$(mktemp -d); cp -a "$R/debian-overlay/." "$OV/"; install -D -m 0755 "$R/board/nvplus-nas/common/nvplus-nand" "$OV/usr/local/sbin/nvplus-nand"
-find "$OV" -type d -exec chmod 0755 {} +; find "$OV" -type f -exec chmod 0644 {} +; chmod 0755 "$OV"/usr/local/sbin/*
+find "$OV" -type d -exec chmod 0755 {} +; find "$OV" -type f -exec chmod 0644 {} +; chmod 0755 "$OV"/usr/local/sbin/* "$OV"/usr/local/bin/lcd-show
 tar -C "$OV" --owner=0 --group=0 --numeric-owner -czf "$P/nas-overlay.tar.gz" .; rm -rf "$OV"
 (cd "$P" && sha256sum * > SHA256SUMS)
 cp "$R/stick/nas-install.conf" "$R/stick/README.txt" "$U/nas-install/"; cp "$R/stick/hooks-README.txt" "$U/nas-install/hooks/README.txt"

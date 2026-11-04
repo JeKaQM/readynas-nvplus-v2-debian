@@ -24,3 +24,14 @@ Recovery
   NAND backups taken before the install: /srv/data/nas-system/nand-*/ (also on the stick).
   Back to stock RAIDiator: write the backed-up mtd2/mtd3 images back with nandwrite from the USB rescue
   system, then use NETGEAR's factory default (erases the disks) to recreate the stock OS.
+
+Front panel
+  nvplus-lcd rotates status pages; the LCD blanks and its backlight turns off after
+  10 minutes without a button press. Any button (including Power) wakes it ONLY:
+  release and press again for actions. When already awake: Backup tap next page,
+  hold 2 s sleep; Reset tap network, hold 5 s reboot; Power tap hint, hold 2 s clean
+  shutdown. Release destructive holds early to cancel. Physical button actions need
+  confirmation on your unit. Warning LEDs keep monitoring when the display sleeps.
+  lcd-show plays the optional demo, then restores status and the 10-minute timer.
+  Runtime and reboot hardware watchdogs are disabled: the old 15 s deadline caused
+  a hard reset during a systemd reload. A complete hang can need manual recovery.

@@ -19,4 +19,10 @@ make O="$W/out-nas-inst" BR2_EXTERNAL="$C" nvplus_nas_installer_defconfig
 make O="$W/out-nas-rd" BR2_EXTERNAL="$C" nvplus_nas_bootrd_defconfig
 make O="$W/out-nas-inst"
 make O="$W/out-nas-rd"
+# The prepared recipe is a copy: use a fresh prepared tree/build after changing the
+# fragment. Check the actual generated config, not just the requested fragment.
+config="$W/out-nas-inst/build/linux-6.12.115/.config"
+for option in CONFIG_HD44780=m CONFIG_HD44780_COMMON=m CONFIG_CHARLCD=m; do
+    grep -qxF "$option" "$config" || { echo "kernel config lacks $option; reconfigure/rebuild"; exit 1; }
+done
 sh "$C/make-usb.sh" "$W" "$DL" "$W/usb"

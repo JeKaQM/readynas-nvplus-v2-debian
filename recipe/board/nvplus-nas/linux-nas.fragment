@@ -182,7 +182,10 @@ CONFIG_POWER_RESET=y
 CONFIG_POWER_RESET_GPIO=y
 CONFIG_CRYPTO_DEV_MARVELL_CESA=m
 CONFIG_HW_RANDOM=y
-# CONFIG_AUXDISPLAY is not set
+# GPIO front LCD; dependent charlcd/hd44780_common modules are selected by Kconfig.
+CONFIG_AUXDISPLAY=y
+CONFIG_HD44780=m
+CONFIG_CHARLCD_BL_ON=y
 
 # --- Networking ---
 CONFIG_NET=y

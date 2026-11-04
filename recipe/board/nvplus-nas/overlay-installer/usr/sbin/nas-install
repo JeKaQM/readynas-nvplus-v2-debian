@@ -16,8 +16,8 @@ PKGS="systemd systemd-sysv systemd-resolved systemd-timesyncd udev dbus kmod ope
  samba samba-common-bin wsdd2 nfs-kernel-server avahi-daemon
  rsync curl ca-certificates openssl sudo less nano vim-tiny htop lsof psmisc procps iproute2 iputils-ping
  bind9-dnsutils bash-completion cron logrotate unattended-upgrades mtd-utils u-boot-tools
- libsocket6-perl libjson-xs-perl libencode-detect-perl"
-SERVICES="systemd-networkd systemd-resolved systemd-timesyncd ssh smbd nmbd wsdd2 nfs-server avahi-daemon smartmontools webmin nvplus-fan"
+ python3 util-linux libsocket6-perl libjson-xs-perl libencode-detect-perl"
+SERVICES="systemd-networkd systemd-resolved systemd-timesyncd ssh smbd nmbd wsdd2 nfs-server avahi-daemon smartmontools webmin nvplus-fan nvplus-lcd"
 APT="apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o Dpkg::Use-Pty=0 -o Acquire::Retries=3"
 
 log() { echo "$(date -u +%H:%M:%S) $*" >> "$LOG"; }
@@ -188,8 +188,16 @@ n=$(ch dpkg-query -W -f='${db:Status-Status}\n' systemd-sysv openssh-server mdad
 [ "$n" -eq 6 ] || die "only $n of 6 key packages are installed"
 log "ok: key packages installed"
 a=$(ch dpkg --audit 2>&1); [ -z "$a" ] || { log "$a"; die "dpkg reports unfinished packages"; }
-for s in ssh systemd-networkd systemd-resolved smbd; do ok ch systemctl is-enabled "$s"; done
+for s in ssh systemd-networkd systemd-resolved smbd nvplus-lcd; do ok ch systemctl is-enabled "$s"; done
 ch systemctl is-enabled webmin >> "$LOG" 2>&1 || ok test -x $T/etc/init.d/webmin
+ok ch test -x /usr/bin/python3
+ok test -x $T/usr/local/sbin/nvplus-lcd
+ok test -x $T/usr/local/bin/lcd-show
+ok ch modinfo -k $KVER hd44780
+ok ch modinfo -k $KVER hd44780_common
+ok ch modinfo -k $KVER charlcd
+ok grep -q '^RuntimeWatchdogSec=off$' $T/etc/systemd/system.conf.d/nas-watchdog.conf
+ok grep -q '^RebootWatchdogSec=off$' $T/etc/systemd/system.conf.d/nas-watchdog.conf
 ok grep -q '^LABEL=nasroot' $T/etc/fstab
 [ "$(grep -c '^ARRAY' $T/etc/mdadm/mdadm.conf)" -ge 3 ] || die "mdadm.conf does not list the three arrays"
 log "ok: mdadm.conf lists $(grep -c '^ARRAY' $T/etc/mdadm/mdadm.conf) arrays"

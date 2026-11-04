@@ -1,0 +1,572 @@
+#!/usr/bin/python3
+"""ReadyNAS NV+ v2 LCD status pages, buttons and RAID LEDs (MIT licensed).
+
+Ten minutes without button activity blanks the text and switches off the backlight.
+Any front button wakes the screen. That entire first press, including a long hold,
+is wake-only; press again for the normal action. Monitoring and warning LEDs stay
+active while asleep. lcd-show pauses LCD writes and restarts the idle timer on exit.
+"""
+import os
+import re
+import select
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+LCD_DEV = '/dev/lcd'
+WIDTH = 16
+PAGE_SECONDS = 5
+BUTTON_PAUSE = 30
+IDLE_SECONDS = 10 * 60
+DATA = '/srv/data'
+PAUSE_FILE = '/run/nvplus-lcd.pause'
+LED = '/sys/class/leds/status:blue:{}_led'
+SATA = '/f1080000.sata/'
+EV_KEY, KEY_POWER, KEY_COPY, KEY_RESTART = 1, 116, 133, 408
+EVENT = struct.Struct('llHHi')  # Native input_event: 16 bytes on the 32-bit NAS.
+HOLD = {KEY_POWER: 2.0, KEY_RESTART: 5.0, KEY_COPY: 2.0}
+COUNTDOWN_AFTER = 0.5
+DEG, HEART, SKULL, UP, DOWN = '\x00', '\x01', '\x02', '\x03', '\x04'
+GLYPHS = ('0c12120c00000000', '000a1f1f0e040000', '0e1f151f0e0a0000',
+          '040e150404040400', '04040404150e0400')
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def read(path, default=''):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def num(path, default=0):
+    try:
+        return int(read(path))
+    except ValueError:
+        return default
+
+
+def run(*cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
+
+def size(n):
+    for unit in 'BKMGT':
+        if n < 1000 or unit == 'T':
+            return (f'{n:.1f}' if n < 10 and unit != 'B' else f'{n:.0f}') + unit
+        n /= 1024
+
+
+def duration(s, compact=False):
+    s = int(s)
+    d, h, m = s // 86400, s % 86400 // 3600, s % 3600 // 60
+    if compact:
+        return f'{d}d' if d >= 2 else f'{d * 24 + h}h' if d or h else f'{m}m'
+    return f'{d}d{h}h' if d else f'{h}h{m:02d}m' if h else f'{m}m'
+
+
+class Lcd:
+    """Open /dev/lcd only during writes: the driver permits a single opener."""
+    def __init__(self):
+        self.ready = False
+        self.backlight = True
+
+    def write(self, text):
+        try:
+            fd = os.open(LCD_DEV, os.O_WRONLY)
+        except OSError:
+            return False
+        try:
+            if not self.ready:
+                os.write(fd, b'\x1b[Lc\x1b[Lb' + (b'\x1b[L+' if self.backlight else b'\x1b[L-'))
+                for i, bits in enumerate(GLYPHS):
+                    os.write(fd, f'\x1b[LG{i}{bits};'.encode())
+                self.ready = True
+            os.write(fd, text.encode('latin-1', 'replace'))
+            return True
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+
+    def show(self, l1, l2=''):
+        self.write('\x1b[Lx0y0;' + l1[:WIDTH].ljust(WIDTH) +
+                   '\x1b[Lx0y1;' + l2[:WIDTH].ljust(WIDTH))
+
+    def set_backlight(self, on):
+        self.backlight = on
+        self.write('\x1b[L+' if on else '\x1b[L-')
+
+
+_led_mode = {}
+
+
+def set_led(name, mode):
+    if _led_mode.get(name) == mode:
+        return
+    p = LED.format(name)
+    try:
+        if mode == 'blink':
+            with open(f'{p}/trigger', 'w') as f:
+                f.write('timer')
+        else:
+            with open(f'{p}/trigger', 'w') as f:
+                f.write('none')
+            with open(f'{p}/brightness', 'w') as f:
+                f.write('1' if mode == 'on' else '0')
+        _led_mode[name] = mode
+    except OSError:
+        pass
+
+
+def bays():
+    """PMP port + 1 -> disk, matched to stock UI slots, not physical bay labels.
+
+    Do not use sdX order: a USB stick changes it. Physical front-label numbering
+    still needs independent confirmation on each hardware variant.
+    """
+    found = {}
+    for d in os.listdir('/sys/block'):
+        p = os.path.realpath(f'/sys/block/{d}')
+        m = re.search(r'/target0:(\d+):', p)
+        if SATA in p and m:
+            found[int(m.group(1)) + 1] = d
+    return found
+
+
+def arrays():
+    names = {}
+    if os.path.isdir('/dev/md'):
+        for n in os.listdir('/dev/md'):
+            names[os.path.basename(os.path.realpath(f'/dev/md/{n}'))] = n
+    out = []
+    for md in sorted(os.listdir('/sys/block')):
+        base = f'/sys/block/{md}/md'
+        if not os.path.isdir(base):
+            continue
+        members = {}
+        for e in os.listdir(base):
+            if e.startswith('dev-'):
+                members[re.sub(r'\d+$', '', e[4:])] = read(f'{base}/{e}/state')
+        done, _, total = read(f'{base}/sync_completed', 'none').partition(' / ')
+        out.append({'dev': md, 'name': names.get(md, md), 'level': read(f'{base}/level'),
+                    'degraded': num(f'{base}/degraded'), 'action': read(f'{base}/sync_action', 'idle'),
+                    'members': members, 'done': int(done) if done.isdigit() else 0,
+                    'total': int(total) if total.isdigit() else 0, 'speed': num(f'{base}/sync_speed')})
+    return out
+
+
+def array_status(a):
+    busy = a['action'] in ('recover', 'resync', 'reshape') and a['total']
+    if a['degraded'] and not busy:
+        return 'degraded'
+    if busy:
+        return 'rebuild'
+    if a['action'] in ('check', 'repair'):
+        return 'check'
+    return 'ok'
+
+
+def bay_pattern(a, bay_map):
+    return '[' + ''.join('U' if 'in_sync' in a['members'].get(bay_map.get(b, '-'), '') else '_'
+                         for b in range(1, 5)) + ']'
+
+
+def hwmon(name):
+    for h in sorted(os.listdir('/sys/class/hwmon')):
+        p = f'/sys/class/hwmon/{h}'
+        if read(f'{p}/name') == name:
+            yield p
+
+
+def disk_temps():
+    temps = {}
+    for p in hwmon('drivetemp'):
+        m = re.search(r'target0:(\d+):', os.path.realpath(f'{p}/device'))
+        if m:
+            temps[int(m.group(1)) + 1] = num(f'{p}/temp1_input') // 1000
+    return temps
+
+
+def fan():
+    for p in hwmon('g762'):
+        return num(f'{p}/pwm1') * 100 // 255, num(f'{p}/fan1_input')
+    return None, None
+
+
+def soc_temp():
+    return num('/sys/class/thermal/thermal_zone0/temp') // 1000
+
+
+class Net:
+    def __init__(self):
+        self.last = None
+        self.rx = self.tx = None
+
+    def sample(self):
+        now = time.monotonic()
+        rx = num('/sys/class/net/eth0/statistics/rx_bytes')
+        tx = num('/sys/class/net/eth0/statistics/tx_bytes')
+        if self.last and now - self.last[0] >= 0.5:
+            t0, rx0, tx0 = self.last
+            self.rx, self.tx = (rx - rx0) / (now - t0), (tx - tx0) / (now - t0)
+        if not self.last or now - self.last[0] >= 0.5:
+            self.last = (now, rx, tx)
+
+
+def page_host(p):
+    return socket.gethostname()[:14].ljust(15) + (SKULL if p.alerts else HEART), p.ip()
+
+
+def page_raid(p):
+    arr = arrays()
+    data = next((a for a in arr if a['name'] == 'nasdata'), arr[-1] if arr else None)
+    if not data:
+        return 'RAID', 'no arrays found'
+    st, pat = array_status(data), bay_pattern(data, bays())
+    l1 = f"{data['level'].upper()} {data['name']}"
+    if st == 'ok':
+        return l1, f'OK {pat} {HEART}'
+    if st == 'rebuild':
+        pct = 100 * data['done'] / data['total']
+        eta = (data['total'] - data['done']) / 2 / data['speed'] if data['speed'] else 0
+        line = f'Rebuild {pct:.1f}%' + (f' {duration(eta, True)}' if eta else '')
+        return l1, line if len(line) <= WIDTH else f'Rebuild {pct:.0f}%' + (f' {duration(eta, True)}' if eta else '')
+    if st == 'check':
+        return l1, f"Check {100 * data['done'] // max(data['total'], 1)}% {pat}"
+    return l1, f'DEGRADED {pat}'
+
+
+def page_storage(p):
+    if not os.path.ismount(DATA):
+        return 'Data volume', 'NOT MOUNTED'
+    u = shutil.disk_usage(DATA)
+    return f'Data {u.used * 100 // u.total}% used', f'Free {size(u.free)}/{size(u.total)}'
+
+
+def page_temps(p):
+    t = disk_temps()
+    def cell(b):
+        return f'D{b} ' + (f'{t[b]}{DEG}' if b in t else '--')
+    return f'{cell(1):<8}{cell(2)}', f'{cell(3):<8}{cell(4)}'
+
+
+def page_system(p):
+    pct, rpm = fan()
+    up = float(read('/proc/uptime', '0').split()[0])
+    load = read('/proc/loadavg', '0').split()[0]
+    return f"CPU {soc_temp()}{DEG} Fan {pct if pct is not None else '?'}%", f'Up {duration(up)} Ld {load}'
+
+
+def page_memory(p):
+    mi = {}
+    for line in read('/proc/meminfo').splitlines():
+        k, _, v = line.partition(':')
+        mi[k] = int(v.split()[0]) if v.split() else 0
+    used = (mi.get('MemTotal', 0) - mi.get('MemAvailable', 0)) // 1024
+    swap = (mi.get('SwapTotal', 0) - mi.get('SwapFree', 0)) // 1024
+    return f"RAM  {used}/{mi.get('MemTotal', 0) // 1024} MB", f"Swap {swap}/{mi.get('SwapTotal', 0) // 1024} MB"
+
+
+def page_network(p):
+    speed = num('/sys/class/net/eth0/speed', -1)
+    l1 = f'LAN {speed} Mb/s' if read('/sys/class/net/eth0/operstate') == 'up' and speed > 0 else 'LAN link down'
+    if p.net.rx is None:
+        return l1, 'measuring...'
+    return l1, f'{DOWN}{size(p.net.rx)}/s {UP}{size(p.net.tx)}/s'
+
+
+def page_clock(p):
+    return time.strftime('%a %d %b %Y'), time.strftime('    %H:%M:%S')
+
+
+PAGES = [page_host, page_raid, page_storage, page_temps, page_system, page_memory, page_network, page_clock]
+
+
+class Panel:
+    def __init__(self):
+        self.lcd, self.net = Lcd(), Net()
+        now = time.monotonic()
+        self.idx, self.page_started, self.hold_until = 0, now, 0.0
+        self.last_activity = now
+        self.alerts, self.failed = [], 0
+        self.next_alerts = self.next_failed = self.next_tick = self.next_keys = 0.0
+        self.keys = None
+        self.held, self.fired = {}, set()
+        self.message = None
+        self.countdown = False
+        self.final = False
+        self.paused = False
+        self._ip, self._ip_at = '', 0.0
+
+    def ip(self):
+        if time.monotonic() - self._ip_at > 15:
+            m = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', run('ip', '-4', '-o', 'addr', 'show', 'scope', 'global'))
+            self._ip, self._ip_at = (m.group(1) if m else 'no IPv4 address'), time.monotonic()
+        return self._ip
+
+    def check_alerts(self):
+        out, bay_map = [], bays()
+        for b in range(1, 5):
+            if b not in bay_map:
+                out.append(f'Bay {b}: no disk')
+        for a in arrays():
+            if array_status(a) == 'degraded':
+                out.append(f"{a['name'][:7]} DEGRADED")
+            out += [f"{d} faulty ({a['name']})" for d, st in a['members'].items() if 'faulty' in st]
+        out += [f'Disk {b} hot {t}{DEG}C' for b, t in sorted(disk_temps().items()) if t >= 50]
+        if soc_temp() >= 75:
+            out.append(f'CPU hot {soc_temp()}{DEG}C')
+        if not os.path.ismount(DATA):
+            out.append('Data not mounted')
+        else:
+            u = shutil.disk_usage(DATA)
+            if u.used * 100 // u.total >= 90:
+                out.append(f'Data {u.used * 100 // u.total}% full')
+        pct, rpm = fan()
+        if pct and rpm == 0:
+            out.append('Fan stopped!')
+        if self.failed:
+            out.append(f'Failed units: {self.failed}')
+        if out != self.alerts:
+            log('warnings: ' + ('; '.join(a.replace(DEG, '') for a in out) or 'none'))
+        self.alerts = out
+
+    def update_leds(self):
+        bay_map, arr = bays(), arrays()
+        for b in range(1, 5):
+            d = bay_map.get(b)
+            states = [a['members'][d] for a in arr if d in a['members']] if d else []
+            if not states or any('faulty' in s for s in states):
+                set_led(f'disk{b}', 'off')
+            elif all('in_sync' in s for s in states):
+                set_led(f'disk{b}', 'on')
+            else:
+                set_led(f'disk{b}', 'blink')
+        set_led('backup', 'blink' if self.alerts else 'off')
+
+    def sequence(self):
+        return [('alert', i) for i in range(len(self.alerts))] + [('page', f) for f in PAGES]
+
+    def current(self):
+        seq = self.sequence()
+        self.idx %= len(seq)
+        kind, x = seq[self.idx]
+        if kind == 'alert':
+            return f'{SKULL} WARNING {x + 1}/{len(self.alerts)}', self.alerts[x]
+        try:
+            return x(self)
+        except Exception as e:
+            return x.__name__[5:], f'error: {e}'[:WIDTH]
+
+    def goto(self, func, now):
+        seq = self.sequence()
+        self.idx = seq.index(('page', func)) if func else (self.idx + 1) % len(seq)
+        self.page_started, self.hold_until = now, now + BUTTON_PAUSE
+
+    def sleep_display(self, reason):
+        if self.lcd.backlight:
+            self.message = None
+            self.lcd.show('', '')
+            self.lcd.set_backlight(False)
+            log('display asleep: ' + reason)
+
+    def wake_display(self, now):
+        self.last_activity = now
+        self.page_started, self.hold_until = now, now + BUTTON_PAUSE
+        self.message = None
+        self.lcd.set_backlight(True)
+        log('display awake; idle timeout 600s')
+
+    def open_keys(self):
+        for e in sorted(os.listdir('/sys/class/input')):
+            if e.startswith('event') and read(f'/sys/class/input/{e}/device/name') == 'gpio-keys':
+                try:
+                    return os.open(f'/dev/input/{e}', os.O_RDONLY | os.O_NONBLOCK)
+                except OSError:
+                    return None
+        return None
+
+    def disconnect_keys(self):
+        # Lost release events must never leave a shutdown/reboot hold armed.
+        if self.keys is not None:
+            try:
+                os.close(self.keys)
+            except OSError:
+                pass
+        self.keys = None
+        self.next_keys = 0.0
+        self.held.clear()
+        self.fired.clear()
+        self.countdown = False
+
+    def on_key(self, code, value, now):
+        if code not in HOLD or self.final:
+            return
+        if value == 1 and code not in self.held:
+            self.last_activity = now
+            self.held[code] = now
+            self.fired.discard(code)
+            if self.paused or os.path.exists(PAUSE_FILE):
+                self.fired.add(code)
+            elif not self.lcd.backlight:
+                self.fired.add(code)  # The whole wake press, even a hold, is consumed.
+                self.wake_display(now)
+                self.tick(now, force=True)
+        elif value == 0 and code in self.held:
+            self.last_activity = now
+            dur = now - self.held.pop(code)
+            self.countdown = False
+            if code in self.fired:
+                self.fired.discard(code)
+            elif dur < COUNTDOWN_AFTER:
+                self.press(code, now)
+            elif code != KEY_COPY:
+                self.message = ('Cancelled', '', now + 2)
+
+    def press(self, code, now):
+        if code == KEY_COPY:
+            self.goto(None, now)
+        elif code == KEY_RESTART:
+            self.goto(page_network, now)
+        elif code == KEY_POWER:
+            self.message = ('Hold Power 2s', 'to shut down', now + 3)
+        self.tick(now, force=True)
+
+    def check_holds(self, now):
+        if self.final:
+            return
+        if self.paused or os.path.exists(PAUSE_FILE):
+            self.fired.update(self.held)  # Never defer a destructive hold across a demo.
+            self.countdown = False
+            return
+        for code, t0 in list(self.held.items()):
+            if code in self.fired:
+                continue
+            left = HOLD[code] - (now - t0)
+            if left <= 0:
+                self.fired.add(code)
+                self.countdown = False
+                self.hold_action(code)
+                if self.final:
+                    break
+            elif code != KEY_COPY and now - t0 >= COUNTDOWN_AFTER:
+                self.countdown = True
+                what = 'Power off' if code == KEY_POWER else 'Reboot'
+                self.lcd.show(f'{what} in {int(left) + 1}s', 'let go = cancel')
+
+    def hold_action(self, code):
+        if code == KEY_COPY:
+            self.sleep_display('Backup held')
+        elif code == KEY_POWER:
+            log('power button held: powering off')
+            self.final = True
+            self.lcd.show('Shutting down...', 'Bye ' + HEART)
+            subprocess.Popen(['systemctl', 'poweroff'])
+        elif code == KEY_RESTART:
+            log('reset button held: rebooting')
+            self.final = True
+            self.lcd.show('Rebooting...', 'See you soon ' + HEART)
+            subprocess.Popen(['systemctl', 'reboot'])
+
+    def tick(self, now, force=False):
+        if not force:
+            self.net.sample()
+            if now >= self.next_failed:
+                self.failed = len([l for l in run('systemctl', '--failed', '--plain', '--no-legend').splitlines() if l.strip()])
+                self.next_failed = now + 60
+            if now >= self.next_alerts:
+                self.check_alerts()
+                self.update_leds()
+                self.next_alerts = now + 10
+        if os.path.exists(PAUSE_FILE):
+            self.paused = True
+            return
+        if self.paused:
+            self.paused, self.lcd.ready = False, False
+            self.wake_display(now)
+        if self.final or self.countdown:
+            return
+        if not self.held and now - self.last_activity >= IDLE_SECONDS:
+            self.sleep_display('10 minutes without button activity')
+        if not self.lcd.backlight:
+            return  # No LCD traffic; warning checks and LEDs above remain active.
+        if self.message:
+            if now < self.message[2]:
+                self.lcd.show(self.message[0], self.message[1])
+                return
+            self.message = None
+        if now >= self.hold_until and now - self.page_started >= PAGE_SECONDS:
+            self.idx += 1
+            self.page_started = now
+        self.lcd.show(*self.current())
+
+    def stop(self, *_):
+        jobs = run('systemctl', 'list-jobs', '--no-legend')
+        if not self.final:
+            if 'reboot.target' in jobs:
+                self.lcd.show('Rebooting...', 'See you soon ' + HEART)
+            elif 'poweroff.target' in jobs or 'halt.target' in jobs:
+                self.lcd.show('Shutting down...', 'Bye ' + HEART)
+            else:
+                self.lcd.show(socket.gethostname(), 'panel stopped')
+        if not self.lcd.backlight:
+            self.lcd.set_backlight(True)
+        for b in range(1, 5):
+            set_led(f'disk{b}', 'off')
+        set_led('backup', 'off')
+        sys.exit(0)
+
+    def run(self):
+        signal.signal(signal.SIGTERM, self.stop)
+        signal.signal(signal.SIGINT, self.stop)
+        self.lcd.write('\f')
+        log('front panel started; idle timeout 600s; first press after sleep is wake-only')
+        while True:
+            now = time.monotonic()
+            if self.keys is None and now >= self.next_keys:
+                self.keys = self.open_keys()
+                self.next_keys = now + 10
+                if self.keys is not None:
+                    log('buttons: listening on gpio-keys')
+            timeout = 0.2 if self.held else max(0.05, self.next_tick - now)
+            ready = []
+            try:
+                ready, _, _ = select.select([self.keys] if self.keys is not None else [], [], [], timeout)
+            except InterruptedError:
+                pass
+            if ready:
+                try:
+                    data = os.read(self.keys, EVENT.size * 32)
+                    if not data:
+                        self.disconnect_keys()
+                except BlockingIOError:
+                    data = b''
+                except OSError:
+                    self.disconnect_keys()
+                    data = b''
+                now = time.monotonic()
+                for off in range(0, len(data) - EVENT.size + 1, EVENT.size):
+                    _, _, typ, code, value = EVENT.unpack_from(data, off)
+                    if typ == EV_KEY:
+                        self.on_key(code, value, now)
+            now = time.monotonic()
+            self.check_holds(now)
+            if now >= self.next_tick:
+                self.tick(now)
+                self.next_tick = now + 1
+
+
+if __name__ == '__main__':
+    Panel().run()

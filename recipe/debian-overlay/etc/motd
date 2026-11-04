@@ -2,6 +2,6 @@
 ReadyNAS NV+ v2 - Debian 13 (armel), kernel 6.12.115 (nvplus)
   Web admin:   https://<this NAS>:10000  (Webmin, log in as root)
   Data:        /srv/data (md RAID + ext4); Samba share "data" for group nasusers
-  Health:      cat /proc/mdstat    smartctl -a /dev/sda    journalctl -u nvplus-fan
+  Health:      cat /proc/mdstat    smartctl -a /dev/<internal-disk>    journalctl -u nvplus-fan
   Boot/kernel: /usr/local/share/nvplus/README
 
