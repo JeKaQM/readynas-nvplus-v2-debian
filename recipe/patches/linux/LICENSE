@@ -1,0 +1,7 @@
+The patches in this directory modify the Linux kernel and are licensed under the
+GNU General Public License version 2 only (GPL-2.0-only), the licence of the Linux
+kernel itself: https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
+SPDX-License-Identifier: GPL-2.0-only
+
+The MIT licence in the repository root (LICENSE) does not apply to these files.

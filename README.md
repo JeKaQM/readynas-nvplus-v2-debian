@@ -790,7 +790,8 @@ timestamps).
 * This guide and the recipe (scripts, configuration, Buildroot tree) are released under the
   [MIT licence](LICENSE).
 * **Exception:** the kernel patches in `recipe/patches/linux/` modify the Linux kernel and are therefore
-  licensed under **GPL-2.0**, like the kernel itself.
+  licensed under **GPL-2.0-only**, like the kernel itself (see
+  [`recipe/patches/linux/LICENSE`](recipe/patches/linux/LICENSE)).
 * Everything the build downloads (Linux, Buildroot, BusyBox, Debian, Webmin, …) keeps its own licence.
   Nothing from NETGEAR's firmware is included in this repository.
 

@@ -19,9 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----------------------------------------------------------------------------
-Exception: the files in recipe/patches/linux/ are modifications of the Linux
-kernel and are licensed under the GNU General Public License version 2
-(GPL-2.0-only), the licence of the Linux kernel itself. The MIT licence above
-does not apply to them.
