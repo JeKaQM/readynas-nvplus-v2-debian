@@ -1,0 +1,230 @@
+#!/bin/sh
+# nas-install - turn a ReadyNAS NV+ v2 into a Debian 13 (armel) NAS with Webmin.
+# Runs from the USB installer ramdisk (Backup + Power boot). Reads nas-install/nas-install.conf on the stick:
+#   WIPE_ALL_FOUR_DISKS=yes  install: ERASES ALL FOUR INTERNAL DISKS; afterwards the line becomes "done-<time>"
+#   anything else            rescue mode: nothing is changed, only the status page on http://<ip>/ runs
+# Steps: 1 checks, 2 NAND backup + flash check, 3 wipe + GPT, 4 RAID + ext4, 5 Debian base, 6 packages,
+#        7 configure, 8 owner hooks (nas-install/hooks/*.sh, run with TARGET=/target), 9 verify, 10 NAND + reboot.
+# On any failure it stops, saves the log to the stick, keeps the status page up and never reboots.
+exec </dev/null
+S=/mnt/stick; P=$S/nas-install; PAY=$P/payload; T=/target
+LOG=/www/install.txt; STATE=/www/state.txt
+KVER=6.12.115; RAID_GUID=A19D880F-05FC-4D3B-A006-743F0F84911E
+STAMP=$(date -u +%Y%m%d-%H%M%S)
+PKGS="systemd systemd-sysv systemd-resolved systemd-timesyncd udev dbus kmod openssh-server
+ mdadm smartmontools hdparm e2fsprogs parted fdisk gdisk dosfstools exfatprogs bsdextrautils
+ samba samba-common-bin wsdd2 nfs-kernel-server avahi-daemon
+ rsync curl ca-certificates openssl sudo less nano vim-tiny htop lsof psmisc procps iproute2 iputils-ping
+ bind9-dnsutils bash-completion cron logrotate unattended-upgrades mtd-utils u-boot-tools
+ libsocket6-perl libjson-xs-perl libencode-detect-perl"
+SERVICES="systemd-networkd systemd-resolved systemd-timesyncd ssh smbd nmbd wsdd2 nfs-server avahi-daemon smartmontools webmin nvplus-fan"
+APT="apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o Dpkg::Use-Pty=0 -o Acquire::Retries=3"
+
+log() { echo "$(date -u +%H:%M:%S) $*" >> "$LOG"; }
+state() { echo "$*" > "$STATE"; log "=== $*"; }
+led() { echo "$2" > "/sys/class/leds/status:blue:$1_led/trigger" 2>/dev/null; }
+savelog() { [ -d "$P" ] || return 0; mkdir -p "$P/logs"; cp "$LOG" "$P/logs/install-$STAMP.txt"; cp /tmp/smart-*.txt "$P/logs/" 2>/dev/null; sync; }
+die() { state "FAILED: $*"; led disk3 none; led disk4 timer; savelog; exit 1; }
+run() { log "\$ $*"; "$@" >> "$LOG" 2>&1 || die "command failed: $*"; }
+ok() { if "$@" >> "$LOG" 2>&1; then log "ok: $*"; else die "check failed: $*"; fi; }
+conf() { v=$(tr -d '\r' < "$P/nas-install.conf" | sed -n "s/^$1=//p" | tail -1); echo "${v:-$2}"; }
+ch() { chroot "$T" /usr/bin/env -i HOME=/root TERM=dumb PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+	DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true LANG=C.UTF-8 "$@"; }
+retry() { n=1; until "$@" >> "$LOG" 2>&1; do [ $n -ge 3 ] && return 1; log "attempt $n failed, retrying in 30 s: $*"; n=$((n + 1)); sleep 30; done; }
+pkg_install() { ch dpkg --configure -a && ch $APT -f install && ch $APT --no-install-recommends install $PKGS /tmp/webmin_2.670_all.deb; }
+parts() { for d in $DISKS; do printf '/dev/%s%s ' "$d" "$1"; done; }
+
+: > "$LOG"
+[ -s /run/stick ] || { state "idle: no installer stick (FAT stick in the front USB port with nas-install/nas-install.conf)"; exit 0; }
+WIPE=$(conf WIPE_ALL_FOUR_DISKS no)
+[ "$WIPE" = yes ] || { state "rescue mode (WIPE_ALL_FOUR_DISKS=$WIPE): nothing is changed"; exit 0; }
+HOST=$(conf HOSTNAME readynas); ZONE=$(conf TIMEZONE Europe/London); RAID=$(conf DATA_RAID 5); FLASH=$(conf FLASH_NAND auto)
+case "$RAID" in 5|6|10) ;; *) die "DATA_RAID must be 5, 6 or 10 (is '$RAID')" ;; esac
+case "$HOST" in ""|-*|*[!a-z0-9-]*) die "HOSTNAME must be lowercase letters, digits and '-' (is '$HOST')" ;; esac
+case "$FLASH" in auto|no) ;; *) die "FLASH_NAND must be auto or no (is '$FLASH')" ;; esac
+led disk3 timer
+
+state "1/10 checks"
+log "nas-install $STAMP: hostname=$HOST timezone=$ZONE data=RAID$RAID flash=$FLASH kernel=$(uname -r)"
+(cd "$PAY" && sha256sum -c SHA256SUMS) >> "$LOG" 2>&1 || die "payload checksums do not match: copy the files to the stick again"
+HOOKS=$(ls "$P"/hooks/*.sh 2>/dev/null)
+[ -n "$HOOKS" ] || die "no nas-install/hooks/*.sh on the stick: without the owner's hook nobody can log in to the new system"
+log "owner hooks: $HOOKS"
+DISKS=""
+for b in /sys/block/sd*; do case "$(readlink -f "$b")" in */f1080000.sata/*) DISKS="$DISKS ${b##*/}" ;; esac; done
+set -- $DISKS; [ $# -eq 4 ] || die "expected 4 internal disks, found $#:$DISKS"
+for d in $DISKS; do
+	sz=$(cat /sys/block/$d/size); [ "$sz" -gt 200000000 ] || die "/dev/$d is too small ($sz sectors)"
+	grep -q "^/dev/$d" /proc/mounts && die "/dev/$d is mounted"
+	smartctl -i -H -A -l error /dev/$d > /tmp/smart-before-$d.txt 2>&1
+	grep -q PASSED /tmp/smart-before-$d.txt || die "/dev/$d: SMART overall health is not PASSED"
+	log "/dev/$d: $(cat /sys/block/$d/device/model), $sz sectors, PMP port $(readlink -f /sys/block/$d | grep -o 'target0:[0-9]' | cut -d: -f2)"
+done
+grep -q '^md' /proc/mdstat && die "md arrays are already active: $(grep '^md' /proc/mdstat)"
+if timeout 40 ntpd -n -q -p pool.ntp.org >> "$LOG" 2>&1; then hwclock -u -w; else log "NTP failed; keeping the RTC time"; fi
+[ "$(date -u +%Y)" -ge 2026 ] || die "the clock is wrong ($(date -u)); Debian's signatures would not verify"
+log "time $(date -u)"
+if ! wget -T 30 -O /dev/null http://deb.debian.org/debian/dists/trixie/InRelease >> "$LOG" 2>&1; then
+	log "resolv.conf: $(tr '\n' ' ' < /etc/resolv.conf)"; log "routes: $(ip route | tr '\n' ';')"
+	die "cannot download from deb.debian.org (DNS or internet access)"
+fi
+log "deb.debian.org reachable"
+
+state "2/10 NAND backup and flash check (nothing has been changed yet)"
+NB=$P/backup/nand-$STAMP
+nvplus-nand backup "$NB" >> "$LOG" 2>&1 || die "NAND backup failed; nothing has been changed"
+if [ "$FLASH" = auto ]; then
+	nvplus-nand check >> "$LOG" 2>&1 || die "NAND flash check failed, so the install stopped before touching the disks; nothing has been changed"
+else
+	log "FLASH_NAND=no: the NAND will not be written"
+fi
+
+state "3/10 wiping and partitioning the four disks"
+for d in $DISKS; do
+	for p in /dev/$d?*; do
+		[ -b "$p" ] || continue
+		mdadm --zero-superblock --force "$p" >> "$LOG" 2>&1
+		wipefs -a "$p" >> "$LOG" 2>&1
+	done
+	run wipefs -a /dev/$d
+	sz=$(cat /sys/block/$d/size)
+	run dd if=/dev/zero of=/dev/$d bs=1M count=16 conv=fsync
+	run dd if=/dev/zero of=/dev/$d bs=512 seek=$((sz - 32768)) count=32768 conv=fsync
+	printf 'label: gpt\nfirst-lba: 2048\n\nstart=2048, size=8GiB, type=%s, name="nas-root"\nsize=1GiB, type=%s, name="nas-swap"\ntype=%s, name="nas-data"\n' \
+		$RAID_GUID $RAID_GUID $RAID_GUID | sfdisk --wipe always --wipe-partitions always /dev/$d >> "$LOG" 2>&1 || die "sfdisk /dev/$d failed"
+done
+sleep 2
+for d in $DISKS; do
+	i=0; while [ ! -b /dev/${d}3 ] && [ $i -lt 15 ]; do sleep 1; i=$((i + 1)); done
+	[ -b /dev/${d}3 ] || die "/dev/${d}3 did not appear"
+	for n in 1 2 3; do wipefs -a /dev/$d$n >> "$LOG" 2>&1; done
+	sfdisk -d /dev/$d >> "$LOG" 2>&1
+	smartctl -A /dev/$d > /tmp/smart-after-wipe-$d.txt 2>&1
+done
+
+state "4/10 creating RAID arrays and filesystems"
+run mdadm --create /dev/md0 --run --level=1 --raid-devices=4 --metadata=1.2 --homehost="$HOST" --name=nasroot $(parts 1)
+run mdadm --create /dev/md1 --run --level=1 --raid-devices=4 --metadata=1.2 --homehost="$HOST" --name=nasswap $(parts 2)
+run mdadm --create /dev/md2 --run --level="$RAID" --raid-devices=4 --metadata=1.2 --homehost="$HOST" --name=nasdata --bitmap=internal --chunk=512 $(parts 3)
+echo 5000 > /sys/block/md2/md/sync_speed_max 2>/dev/null	# leave the disks to the install; the resync continues in Debian
+cat /proc/mdstat >> "$LOG"
+run mkfs.ext4 -F -q -L nasroot /dev/md0
+run mkswap -L nasswap /dev/md1
+run mkfs.ext4 -F -q -L nasdata -m 1 /dev/md2
+swapon /dev/md1 >> "$LOG" 2>&1 || log "swapon /dev/md1 failed (continuing)"
+mkdir -p $T; run mount -t ext4 -o noatime /dev/md0 $T
+
+state "5/10 unpacking Debian 13 (armel) and the kernel modules"
+tar --version 2>/dev/null | grep -q GNU || die "GNU tar is missing from the installer"
+run tar -xzpf "$PAY/debian-trixie-armel-rootfs.tar.gz" -C $T --numeric-owner
+mkdir -p $T/usr/lib/modules
+run tar -xzf "$PAY/modules-$KVER.tar.gz" -C $T/usr/lib/modules --numeric-owner
+mkdir -p $T/srv/data; run mount -t ext4 -o noatime /dev/md2 $T/srv/data
+for m in proc sys dev run tmp; do mkdir -p $T/$m; done
+run mount -t proc proc $T/proc
+run mount -t sysfs sysfs $T/sys
+run mount -o bind /dev $T/dev
+mount -o bind /dev/pts $T/dev/pts >> "$LOG" 2>&1 || log "no /dev/pts bind (continuing)"
+run mount -t tmpfs -o mode=0755 tmpfs $T/run
+chmod 1777 $T/tmp
+rm -f $T/etc/resolv.conf; sed 's/[[:space:]]*#.*$//' /etc/resolv.conf > $T/etc/resolv.conf
+printf '#!/bin/sh\nexit 101\n' > $T/usr/sbin/policy-rc.d; chmod 0755 $T/usr/sbin/policy-rc.d
+cp "$PAY/webmin_2.670_all.deb" $T/tmp/
+
+state "6/10 installing Debian packages and Webmin (about 200 MB download; 20-40 min)"
+retry ch $APT update || die "apt-get update failed"
+retry pkg_install || die "package installation failed"
+retry ch $APT upgrade || log "apt-get upgrade failed (continuing; unattended-upgrades catches up)"
+ch apt-get clean
+
+state "7/10 configuring the NAS"
+run tar -xzf "$PAY/nas-overlay.tar.gz" -C $T --numeric-owner --no-overwrite-dir
+echo "$HOST" > $T/etc/hostname
+printf '127.0.0.1\tlocalhost\n127.0.1.1\t%s\n::1\tlocalhost ip6-localhost ip6-loopback\nff02::1\tip6-allnodes\nff02::2\tip6-allrouters\n' "$HOST" > $T/etc/hosts
+cat > $T/etc/fstab <<FSTAB
+# written by nas-install $STAMP
+LABEL=nasroot  /          ext4  noatime,errors=remount-ro                     0  1
+LABEL=nasdata  /srv/data  ext4  noatime,nofail,x-systemd.device-timeout=60s  0  2
+LABEL=nasswap  none       swap  sw,nofail                                     0  0
+FSTAB
+[ -f "$T/usr/share/zoneinfo/$ZONE" ] || { log "unknown TIMEZONE '$ZONE', using UTC"; ZONE=Etc/UTC; }
+ln -sf "/usr/share/zoneinfo/$ZONE" $T/etc/localtime; echo "$ZONE" > $T/etc/timezone
+mkdir -p $T/etc/mdadm	# Debian's own generator first (reads the superblocks), the installer's mdadm as fallback
+if ch /usr/share/mdadm/mkconf > /tmp/mdadm.conf 2>> "$LOG" && grep -q '^ARRAY' /tmp/mdadm.conf; then
+	cp /tmp/mdadm.conf $T/etc/mdadm/mdadm.conf
+else
+	log "mkconf gave no ARRAY lines; using mdadm --detail --scan"
+	{ echo "# written by nas-install $STAMP"; echo "HOMEHOST <system>"; echo "MAILADDR root"; mdadm --detail --scan 2>> "$LOG"; } > $T/etc/mdadm/mdadm.conf
+fi
+log "mdadm.conf:"; grep -v '^#' $T/etc/mdadm/mdadm.conf | grep . >> "$LOG"
+rm -f $T/etc/machine-id
+ch systemd-machine-id-setup >> "$LOG" 2>&1 || tr -d '-' < /proc/sys/kernel/random/uuid > $T/etc/machine-id
+ok test -s $T/etc/machine-id
+run ch depmod -a $KVER
+ch groupadd -f nasusers >> "$LOG" 2>&1
+mkdir -p $T/srv/data/share $T/srv/data/backup $T/srv/data/nas-system
+ch chown root:nasusers /srv/data/share >> "$LOG" 2>&1; chmod 2775 $T/srv/data/share
+cp -a "$NB" $T/srv/data/nas-system/
+mkdir -p $T/usr/local/share/nvplus
+cp "$PAY/uImage-nas" "$PAY/uInitrd-nas" $T/usr/local/share/nvplus/
+(cd $T/usr/local/share/nvplus && sha256sum uImage-nas uInitrd-nas > SHA256SUMS)
+for s in $SERVICES; do ch systemctl enable "$s" >> "$LOG" 2>&1 || log "could not enable $s"; done
+rm -f $T/usr/sbin/policy-rc.d $T/etc/apt/apt.conf.d/docker-* $T/etc/dpkg/dpkg.cfg.d/docker-* $T/tmp/webmin_*.deb
+echo "nas-install $STAMP: Debian $(cat $T/etc/debian_version), kernel $KVER, data RAID$RAID" > $T/etc/nvplus-release
+
+state "8/10 running the owner's hooks from the stick"
+for h in $HOOKS; do
+	log "hook $h"
+	tr -d '\r' < "$h" > /tmp/hook.sh
+	TARGET=$T sh /tmp/hook.sh >> "$LOG" 2>&1 || die "hook $h failed (exit $?)"
+done
+rm -f /tmp/hook.sh
+
+state "9/10 verifying the installed system"
+ok ch test -x /sbin/init
+ok test -e $T/usr/lib/systemd/systemd
+ok test -s $T/usr/lib/modules/$KVER/modules.dep
+n=$(ch dpkg-query -W -f='${db:Status-Status}\n' systemd-sysv openssh-server mdadm samba nfs-kernel-server webmin 2>/dev/null | grep -cx installed)
+[ "$n" -eq 6 ] || die "only $n of 6 key packages are installed"
+log "ok: key packages installed"
+a=$(ch dpkg --audit 2>&1); [ -z "$a" ] || { log "$a"; die "dpkg reports unfinished packages"; }
+for s in ssh systemd-networkd systemd-resolved smbd; do ok ch systemctl is-enabled "$s"; done
+ch systemctl is-enabled webmin >> "$LOG" 2>&1 || ok test -x $T/etc/init.d/webmin
+ok grep -q '^LABEL=nasroot' $T/etc/fstab
+[ "$(grep -c '^ARRAY' $T/etc/mdadm/mdadm.conf)" -ge 3 ] || die "mdadm.conf does not list the three arrays"
+log "ok: mdadm.conf lists $(grep -c '^ARRAY' $T/etc/mdadm/mdadm.conf) arrays"
+
+state "10/10 finishing: unmounting, then writing the kernel and boot initrd to NAND"
+ln -sf ../run/systemd/resolve/stub-resolv.conf $T/etc/resolv.conf
+echo system > /sys/block/md2/md/sync_speed_max 2>/dev/null
+# stop anything a package started inside the new system (Webmin's postinst starts miniserv), then unmount
+for sig in TERM KILL; do
+	for p in /proc/[0-9]*; do
+		r=$(readlink "$p/root" 2>/dev/null); c=$(readlink "$p/cwd" 2>/dev/null)
+		case "$r|$c" in "$T"*|*"|$T"*) log "stopping ${p#/proc/} ($(cat "$p/comm" 2>/dev/null)) with SIG$sig"; kill -$sig "${p#/proc/}" 2>/dev/null ;; esac
+	done
+	sleep 3
+done
+sync
+for m in $T/run $T/dev/pts $T/dev $T/sys $T/proc $T/srv/data $T; do
+	grep -q " $m " /proc/mounts || continue
+	n=1; until umount "$m" >> "$LOG" 2>&1; do
+		[ $n -ge 3 ] && die "could not unmount $m (still in use)"
+		n=$((n + 1)); sleep 3
+	done
+done
+swapoff /dev/md1 >> "$LOG" 2>&1
+mdadm --stop /dev/md2 /dev/md1 /dev/md0 >> "$LOG" 2>&1 || log "mdadm --stop reported a problem (the arrays are stopped at reboot anyway)"
+if [ "$FLASH" = auto ]; then
+	for l in disk1 disk2 disk3 disk4; do led $l default-on; done
+	nvplus-nand write "$PAY/uImage-nas" "$PAY/uInitrd-nas" >> "$LOG" 2>&1 ||
+		die "writing the NAND failed (the disks are installed). Do not power-cycle; the agent will look at it"
+fi
+sed -i "s/^WIPE_ALL_FOUR_DISKS=yes/WIPE_ALL_FOUR_DISKS=done-$STAMP/" "$P/nas-install.conf"
+if [ "$FLASH" = auto ]; then
+	state "DONE: Debian installed and NAND written; rebooting into Debian in 10 s"
+	savelog; umount $S; sleep 10; reboot
+else
+	state "DONE except the NAND (FLASH_NAND=no): do not power-cycle; the agent finishes by hand"
+	led disk3 default-on; savelog
+fi

@@ -1,0 +1,19 @@
+#!/bin/sh
+# Mount the FAT stick (front USB port) that carries nas-install/nas-install.conf at /mnt/stick.
+[ "$1" = start ] || exit 0
+S=/mnt/stick; mkdir -p $S
+found() {
+	for b in /sys/block/sd*; do
+		[ -e "$b" ] || continue
+		case "$(readlink -f "$b")" in */usb*) ;; *) continue ;; esac
+		for p in "/dev/${b##*/}1" "/dev/${b##*/}"; do
+			[ -b "$p" ] || continue
+			mount -t vfat -o rw,noatime,flush "$p" $S 2>/dev/null || continue
+			[ -f $S/nas-install/nas-install.conf ] && { echo "$p" > /run/stick; return 0; }
+			umount $S
+		done
+	done
+	return 1
+}
+i=0; until found || [ $i -ge 30 ]; do sleep 1; i=$((i + 1)); done
+exit 0

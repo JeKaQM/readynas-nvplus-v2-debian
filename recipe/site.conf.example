@@ -1,0 +1,9 @@
+# Per-unit settings for the ReadyNAS NV+ v2 recipe. Copy to site.conf, edit, then run ./prepare.sh site.conf OUT_DIR.
+# UNIT_MAC: this unit's own Ethernet MAC (sticker on the case, or "ethaddr" in the U-Boot environment).
+#   Stock U-Boot passes no device tree, so Linux would otherwise invent a random MAC and DHCP would hand out
+#   a different address on every boot.
+UNIT_MAC=00:11:22:33:44:55
+# Used only if DHCP fails (installer and the boot initrd's rescue page): address, gateway, DNS server
+FALLBACK_IP=192.168.0.50
+FALLBACK_GW=192.168.0.1
+FALLBACK_DNS=192.168.0.1

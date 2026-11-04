@@ -1,0 +1,26 @@
+ReadyNAS NV+ v2 running Debian 13 - how it boots and how to recover it
+=====================================================================
+
+Boot chain
+  Stock NETGEAR U-Boot (NAND "u-boot", never written) runs its saved bootcmd:
+    nand read.e 0x1200000 0x200000 0x600000; nand read.e 0x2000000 0x800000 0x1000000; bootm 0x1200000 0x2000000
+  NAND "uImage" (mtd2, 6 MiB)       Linux 6.12.115 + device tree, XIP uImage at 0x1200000 (uImage-nas here)
+  NAND "minirootfs" (mtd3, 16 MiB)  boot initrd (uInitrd-nas here): assembles md RAID, fscks and mounts
+                                    LABEL=nasroot read-only, switch_root to systemd. On failure it shows a
+                                    read-only status page on http://<NAS>/ instead and does not reboot.
+  Disks: GPT on each; p1 -> md0 RAID1 x4 ext4 "nasroot" (/), p2 -> md1 RAID1 x4 swap, p3 -> md2 ext4
+  "nasdata" (/srv/data). Kernel modules: /usr/lib/modules/6.12.115. Boot log: /run/nvplus-boot.log.
+
+Updating the kernel or boot initrd
+  nvplus-nand check                        safety checks only (U-Boot env, ECC compatibility, bad blocks)
+  nvplus-nand write uImage-nas uInitrd-nas back up the current images in RAM, write, read back, compare;
+                                           restores the previous images if writing fails
+  Build recipe: the "recipe" folder of the readynas-nvplus-v2-debian project (Buildroot 2025.02.19 external tree).
+
+Recovery
+  The USB stick (front port, FAT32) with uImage-recovery + initrd-recovery.gz boots by holding Backup
+  while pressing Power until the Backup LED blinks. With WIPE_ALL_FOUR_DISKS not "yes" in
+  nas-install/nas-install.conf it changes nothing (rescue mode, status page only).
+  NAND backups taken before the install: /srv/data/nas-system/nand-*/ (also on the stick).
+  Back to stock RAIDiator: write the backed-up mtd2/mtd3 images back with nandwrite from the USB rescue
+  system, then use NETGEAR's factory default (erases the disks) to recreate the stock OS.

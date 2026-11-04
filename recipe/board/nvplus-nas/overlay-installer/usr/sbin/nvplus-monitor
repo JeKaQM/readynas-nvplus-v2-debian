@@ -1,0 +1,34 @@
+#!/bin/sh
+# Every 15 s refresh /www/status.txt and steer the fan (quiet): 40 % normally, 50 % once a disk reaches 42 C,
+# full speed while a disk is at 50 C or more or the SoC at 75 C or more. Power off at SoC >= 95 C (limit 105 C).
+cur=""; n=0; disk=0
+pwm() { [ -n "$g" ] && [ "$1" != "$cur" ] && { echo "$1" > "$g/pwm1"; cur=$1; }; }
+while :; do
+	t=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0)
+	g=$(cat /run/g762 2>/dev/null)
+	if [ $((n % 4)) -eq 0 ]; then	# disk temperatures (SMART 194) once a minute
+		disk=0
+		for b in /sys/block/sd*; do
+			case "$(readlink -f "$b")" in */f1080000.sata/*) ;; *) continue ;; esac
+			d=$(smartctl -A "/dev/${b##*/}" 2>/dev/null | awk '$1 == 194 { print $10 + 0; exit }')
+			[ -n "$d" ] && [ "$d" -gt "$disk" ] && disk=$d
+		done
+	fi
+	n=$((n + 1))
+	if [ "$disk" -ge 50 ] || [ "$t" -ge 75000 ]; then pwm 255
+	elif [ "$disk" -ge 42 ]; then pwm 128
+	else pwm 102; fi
+	if [ "$t" -ge 95000 ]; then echo "OVERHEAT: SoC $t mC, powering off" >> /www/install.txt; sync; poweroff; fi
+	{
+		echo "== $(date -u '+%F %T UTC')  uptime $(cut -d' ' -f1 /proc/uptime)s"
+		echo "state: $(cat /www/state.txt)"
+		echo "network: $(cat /run/netmode 2>/dev/null) $(ip -4 -o addr show eth0 | awk '{print $4}')  stick: $(cat /run/stick 2>/dev/null)"
+		echo "SoC ${t} mC  hottest disk ${disk} C  fan $(cat "$g/fan1_input" 2>/dev/null) rpm, pwm $(cat "$g/pwm1" 2>/dev/null)  load $(cut -d' ' -f1-3 /proc/loadavg)"
+		free | sed -n '1,3p'
+		echo; cat /proc/mdstat 2>/dev/null
+		echo; df -h 2>/dev/null | grep -E 'Filesystem|/target|/mnt/stick'
+		echo; echo "== last 40 lines of install.txt"; tail -40 /www/install.txt
+	} > /www/status.tmp 2>&1
+	mv /www/status.tmp /www/status.txt
+	sleep 15
+done

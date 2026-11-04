@@ -1,0 +1,46 @@
+#!/bin/sh
+# nvplus-fan: quiet G762 fan control for the ReadyNAS NV+ v2 (open-loop PWM 0-255).
+# Normal range 30-50 %: 30 % up to 36 C on the hottest disk (drivetemp), rising to 50 % at 46 C and capped there.
+# Safety net: full speed while a disk is at 52 C or more or the SoC at 75 C or more, until the disks are back
+# under 48 C and the SoC under 70 C. If the fan reports no RPM, the minimum is raised in 5 % steps; no RPM even
+# at 50 % is a fan fault, so full speed. No disk temperature readable: 50 %.
+#   nvplus-fan safe    set 50 % once and exit (used when the service stops)
+MIN=77; CAP=128; FULL=255; LO=36; HI=46; HOT=52; COOL=48; SOC_HOT=75000; SOC_COOL=70000; STEP=13
+g=""; for d in /sys/class/hwmon/hwmon*; do [ "$(cat "$d/name" 2>/dev/null)" = g762 ] && g=$d; done
+[ -n "$g" ] || { echo "nvplus-fan: G762 not found"; exit 1; }
+echo 1 > "$g/pwm1_enable"
+[ "${1:-}" = safe ] && { echo $CAP > "$g/pwm1"; exit 0; }
+floor=$MIN; last=-1; stall=0; hot=0
+while :; do
+	disk=0
+	for d in /sys/class/hwmon/hwmon*; do
+		[ "$(cat "$d/name" 2>/dev/null)" = drivetemp ] || continue
+		t=$(cat "$d/temp1_input" 2>/dev/null) || continue
+		t=$((t / 1000)); [ "$t" -gt "$disk" ] && disk=$t
+	done
+	soc=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0)
+	if [ "$disk" -ge $HOT ] || [ "$soc" -ge $SOC_HOT ]; then hot=1
+	elif [ "$disk" -lt $COOL ] && [ "$soc" -lt $SOC_COOL ]; then hot=0; fi
+	if [ $hot -eq 1 ]; then pwm=$FULL
+	elif [ "$disk" -eq 0 ]; then pwm=$CAP
+	elif [ "$disk" -le $LO ]; then pwm=$MIN
+	elif [ "$disk" -ge $HI ]; then pwm=$CAP
+	else pwm=$((MIN + (disk - LO) * (CAP - MIN) / (HI - LO))); fi
+	rpm=$(cat "$g/fan1_input" 2>/dev/null || echo 0)
+	if [ "$last" -gt 0 ] && [ "$rpm" -lt 300 ]; then stall=$((stall + 1)); else stall=0; fi
+	if [ $stall -ge 2 ]; then
+		stall=0
+		if [ $floor -lt $CAP ]; then
+			floor=$((floor + STEP)); [ $floor -gt $CAP ] && floor=$CAP
+			echo "nvplus-fan: no RPM at pwm $last, raising the minimum to $floor"
+		else
+			floor=$FULL; echo "nvplus-fan: WARNING no RPM even at 50 %: fan fault, running at full speed"
+		fi
+	fi
+	[ "$pwm" -lt $floor ] && pwm=$floor
+	if [ "$pwm" -ne "$last" ]; then
+		echo "$pwm" > "$g/pwm1"; last=$pwm
+		echo "nvplus-fan: pwm $pwm ($((pwm * 100 / 255)) %), hottest disk ${disk} C, SoC $((soc / 1000)) C, fan $rpm rpm"
+	fi
+	sleep 20
+done

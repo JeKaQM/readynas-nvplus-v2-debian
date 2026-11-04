@@ -1,0 +1,12 @@
+[Unit]
+Description=ReadyNAS NV+ v2 fan control (G762, quiet 30-50 %, full only when hot)
+After=systemd-modules-load.service
+
+[Service]
+ExecStart=/usr/local/sbin/nvplus-fan
+ExecStopPost=/usr/local/sbin/nvplus-fan safe
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

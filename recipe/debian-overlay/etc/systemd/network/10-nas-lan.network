@@ -1,0 +1,10 @@
+# The NAS's own port: DHCP, identified by its MAC like the stock firmware, so the router hands out the same address.
+[Match]
+MACAddress=@UNIT_MAC@
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=yes
+
+[DHCPv4]
+ClientIdentifier=mac

@@ -1,0 +1,30 @@
+nvplus: NV+ v2 DTS - unit MAC (no FDT from stock U-Boot), read-only U-Boot env, disk4 LED pinmux
+
+--- a/arch/arm/boot/dts/marvell/kirkwood-netgear_readynas_nv+_v2.dts	2026-11-03 20:57:28.589518999 +0000
++++ b/arch/arm/boot/dts/marvell/kirkwood-netgear_readynas_nv+_v2.dts	2026-11-03 20:57:28.590518986 +0000
+@@ -131,7 +131,7 @@
+ 		compatible = "gpio-leds";
+ 		pinctrl-0 = < &pmx_led_blue_power &pmx_led_blue_backup
+ 			      &pmx_led_blue_disk1 &pmx_led_blue_disk2
+-			      &pmx_led_blue_disk3 &pmx_led_blue_disk3 >;
++			      &pmx_led_blue_disk3 &pmx_led_blue_disk4 >;
+ 		pinctrl-names = "default";
+ 
+ 		power_led {
+@@ -229,6 +229,7 @@
+ 	partition@180000 {
+ 		label = "u-boot-env";
+ 		reg = <0x180000 0x20000>;
++		read-only;	/* nvplus: Linux only reads the U-Boot environment */
+ 	};
+ 
+ 	partition@200000 {
+@@ -261,6 +262,8 @@
+ 
+ 	ethernet0-port@0 {
+ 		phy-handle = <&ethphy0>;
++		/* nvplus: stock U-Boot passes no FDT, so give the port this unit's own MAC */
++		local-mac-address = [@UNIT_MAC_BYTES@];
+ 	};
+ };
+ 

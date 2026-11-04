@@ -1,0 +1,119 @@
+#!/bin/sh
+# nvplus-nand - back up, check and write the kernel/initrd NAND partitions of a ReadyNAS NV+ v2.
+#   nvplus-nand backup DIR             dump all five NAND partitions (plus raw OOB of the first four) into DIR
+#   nvplus-nand check                  may Linux write "uImage"/"minirootfs" so that the stock U-Boot boots them?
+#   nvplus-nand write KERNEL INITRD    check, then erase, write and read back "uImage" and "minirootfs"
+# U-Boot ("u-boot") and its environment ("u-boot-env") are never written; both are read-only in the device tree.
+# The stock U-Boot boots with: nand read.e 0x1200000 0x200000 0x600000; nand read.e 0x2000000 0x800000 0x1000000;
+# bootm 0x1200000 0x2000000, so the kernel is an XIP uImage at 0x1200000 and the initrd a ramdisk uImage.
+set -u
+EXPECT_BOOTCMD='nand read.e 0x1200000 0x200000 0x600000;nand read.e 0x2000000 0x800000 0x1000000;bootm 0x1200000 0x2000000'
+TMP=${TMPDIR:-/tmp}/nvplus-nand.$$
+
+say() { echo "nvplus-nand: $*"; }
+fail() { say "FAIL: $*"; rm -rf "$TMP"; exit 1; }
+usage() { sed -n '2,4p' "$0"; exit 2; }
+mtd() { awk -v n="\"$1\"" '$4 == n { sub(":", "", $1); print $1 }' /proc/mtd; }
+sysmtd() { cat "/sys/class/mtd/$1/$2" 2>/dev/null || echo 0; }
+# CRC-32 of stdin (zlib polynomial, as U-Boot uses) as big-endian hex, taken from gzip's trailer
+crc32() { gzip -1 -c | tail -c 8 | head -c 4 | hexdump -v -e '4/1 "%02x"' | swap32; }
+swap32() { sed 's/\(..\)\(..\)\(..\)\(..\)/\4\3\2\1/'; }
+hex32() { hexdump -v -s "$2" -n 4 -e '4/1 "%02x"' "$1"; }
+norm() { echo "$1" | sed 's/[[:space:]]*;[[:space:]]*/;/g; s/^[[:space:]]*//; s/[[:space:]]*$//'; }
+
+# uimage FILE [TYPE]: legacy uImage with valid magic, header CRC and data CRC (TYPE 2 = kernel, 3 = ramdisk)
+uimage() {
+	f=$1
+	[ "$(hex32 "$f" 0)" = 27051956 ] || { say "$f: no uImage magic"; return 1; }
+	size=$((0x$(hex32 "$f" 12)))
+	calc=$({ head -c 4 "$f"; printf '\000\000\000\000'; tail -c +9 "$f" | head -c 56; } | crc32)
+	[ "$calc" = "$(hex32 "$f" 4)" ] || { say "$f: bad header CRC"; return 1; }
+	[ $(($(wc -c < "$f"))) -ge $((64 + size)) ] || { say "$f: shorter than its header says"; return 1; }
+	calc=$(tail -c +65 "$f" | head -c "$size" | crc32)
+	[ "$calc" = "$(hex32 "$f" 24)" ] || { say "$f: bad data CRC"; return 1; }
+	typ=$(hexdump -v -s 30 -n 1 -e '1/1 "%d"' "$f")
+	[ -z "${2:-}" ] || [ "$typ" = "$2" ] || { say "$f: image type $typ, expected $2"; return 1; }
+	say "$f: valid uImage type $typ, $size bytes, load 0x$(hex32 "$f" 16), entry 0x$(hex32 "$f" 20), '$(dd if="$f" bs=1 skip=32 count=32 2>/dev/null | tr -d '\000')'"
+}
+
+backup() {
+	d=$1; mkdir -p "$d" || fail "cannot create $d"
+	{ cat /proc/mtd
+	  for s in /sys/class/mtd/mtd[0-9]; do m=${s##*/}
+	    echo "$m name=$(sysmtd $m name) size=$(sysmtd $m size) erasesize=$(sysmtd $m erasesize) writesize=$(sysmtd $m writesize) oobsize=$(sysmtd $m oobsize) bad_blocks=$(sysmtd $m bad_blocks) ecc_failures=$(sysmtd $m ecc_failures) corrected_bits=$(sysmtd $m corrected_bits)"
+	  done; } > "$d/mtd-info.txt"
+	for p in u-boot u-boot-env uImage minirootfs jffs2; do
+		m=$(mtd $p); [ -n "$m" ] || fail "no mtd partition '$p'"
+		nanddump -q -f "$d/$m-$p.bin" "/dev/$m" || fail "nanddump /dev/$m failed"
+	done
+	for p in u-boot u-boot-env uImage minirootfs; do
+		m=$(mtd $p); nanddump -q -n -o -f "$d/$m-$p.raw-with-oob.bin" "/dev/$m" || fail "raw nanddump /dev/$m failed"
+	done
+	(cd "$d" && sha256sum *.bin > SHA256SUMS) || fail "checksums"
+	say "backup of all NAND partitions in $d"
+}
+
+check() {
+	mkdir -p "$TMP"
+	for p in u-boot u-boot-env uImage minirootfs jffs2; do [ -n "$(mtd $p)" ] || fail "no mtd partition '$p'"; done
+	# 1. The saved U-Boot environment has a valid CRC and the stock NAND bootcmd.
+	e=$(mtd u-boot-env); nanddump -q -f "$TMP/env" "/dev/$e" || fail "cannot read /dev/$e"
+	stored=$(hex32 "$TMP/env" 0 | swap32); envsize=""
+	for sz in 131072 65536 32768 16384 8192 4096; do
+		[ "$(tail -c +5 "$TMP/env" | head -c $((sz - 4)) | crc32)" = "$stored" ] && { envsize=$sz; break; }
+	done
+	[ -n "$envsize" ] || fail "U-Boot environment CRC matches no expected size"
+	bootcmd=$(tail -c +5 "$TMP/env" | head -c $((envsize - 4)) | tr '\000' '\n' | sed -n 's/^bootcmd=//p' | head -1)
+	say "U-Boot environment: $envsize bytes, CRC ok, bootcmd='$bootcmd'"
+	[ "$(norm "$bootcmd")" = "$EXPECT_BOOTCMD" ] || fail "bootcmd is not the stock NAND bootcmd"
+	# 2. Linux's NAND ECC matches U-Boot's: NETGEAR's kernel and initrd read back through Linux
+	#    with no ECC failures and intact image CRCs. Bad blocks are refused (flash those by hand).
+	for p in uImage:2 minirootfs:3; do
+		n=${p%:*}; t=${p#*:}; m=$(mtd $n)
+		bb=$(sysmtd $m bad_blocks); [ "$bb" = 0 ] || fail "/dev/$m ($n) has $bb bad block(s)"
+		f0=$(sysmtd $m ecc_failures); c0=$(sysmtd $m corrected_bits)
+		nanddump -q -f "$TMP/$n" "/dev/$m" || fail "cannot read /dev/$m"
+		df=$(( $(sysmtd $m ecc_failures) - f0 )); dc=$(( $(sysmtd $m corrected_bits) - c0 ))
+		say "/dev/$m ($n): ECC failures +$df, corrected bits +$dc"
+		[ "$df" -eq 0 ] || fail "/dev/$m: ECC failures on the existing image: Linux and U-Boot ECC differ"
+		[ "$dc" -le 16 ] || fail "/dev/$m: $dc corrected bits on the existing image"
+		uimage "$TMP/$n" "$t" || fail "/dev/$m: existing image does not verify through Linux ECC"
+	done
+	say "check passed: U-Boot can read what Linux writes to uImage and minirootfs"
+}
+
+# write_part NAME FILE TYPE: erase, write, read back, compare; two attempts
+write_part() {
+	m=$(mtd $1); sz=$(($(wc -c < "$2"))); psz=$(sysmtd $m size); eb=$(sysmtd $m erasesize)
+	[ "$sz" -le $((psz - eb)) ] || { say "$2 ($sz bytes) does not fit /dev/$m ($psz bytes, one block spare)"; return 1; }
+	for try in 1 2; do
+		if flash_erase -q "/dev/$m" 0 0 && nandwrite -q -p "/dev/$m" "$2" &&
+		   nanddump -q -l "$sz" -f "$TMP/rb" "/dev/$m" && head -c "$sz" "$TMP/rb" > "$TMP/rb2" &&
+		   cmp -s "$TMP/rb2" "$2" && uimage "$TMP/rb2" "$3" >/dev/null; then
+			say "/dev/$m ($1): written and read back identical, $sz bytes"; return 0
+		fi
+		say "/dev/$m ($1): attempt $try failed"
+	done
+	return 1
+}
+
+write() {
+	uimage "$1" 2 || fail "$1 is not a valid kernel uImage"
+	[ "$(hex32 "$1" 16)" = 01200000 ] && [ "$(hex32 "$1" 20)" = 01200040 ] || fail "$1 must be XIP: load 0x01200000, entry 0x01200040"
+	uimage "$2" 3 || fail "$2 is not a valid ramdisk uImage"
+	check
+	for n in uImage minirootfs; do   # keep the current images, cut to their real length, for a restore
+		head -c $((64 + 0x$(hex32 "$TMP/$n" 12))) "$TMP/$n" > "$TMP/prev-$n"
+	done
+	if write_part uImage "$1" 2 && write_part minirootfs "$2" 3; then say "NAND updated"; rm -rf "$TMP"; return 0; fi
+	say "writing failed: restoring the previous uImage and minirootfs"
+	write_part uImage "$TMP/prev-uImage" 2; write_part minirootfs "$TMP/prev-minirootfs" 3
+	fail "NAND update failed"
+}
+
+case "${1:-}" in
+	backup) [ $# -eq 2 ] || usage; backup "$2" ;;
+	check) [ $# -eq 1 ] || usage; check; rm -rf "$TMP" ;;
+	write) [ $# -eq 3 ] || usage; write "$2" "$3" ;;
+	*) usage ;;
+esac

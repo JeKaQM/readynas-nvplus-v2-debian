@@ -1,0 +1,11 @@
+#!/bin/sh
+# LEDs: Backup off, Disk1 heartbeat = installer running. Fan open loop at 40 % (PWM 102); nvplus-monitor steers it.
+[ "$1" = start ] || exit 0
+L=/sys/class/leds/status:blue
+echo none > "$L:backup_led/trigger" 2>/dev/null; echo 0 > "$L:backup_led/brightness" 2>/dev/null
+echo heartbeat > "$L:disk1_led/trigger" 2>/dev/null
+for d in /sys/class/hwmon/hwmon*; do
+	[ "$(cat "$d/name" 2>/dev/null)" = g762 ] || continue
+	echo 1 > "$d/pwm1_enable" 2>/dev/null; echo 102 > "$d/pwm1" 2>/dev/null; echo "$d" > /run/g762
+done
+exit 0

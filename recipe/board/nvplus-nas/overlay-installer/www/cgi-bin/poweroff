@@ -1,0 +1,7 @@
+#!/bin/sh
+# Power the NAS off from the status page, only when the installer is not working (failed, idle, rescue or done).
+printf 'Content-Type: text/plain\r\n\r\n'
+case "$(cat /www/state.txt 2>/dev/null)" in
+	FAILED*|idle*|rescue*|DONE*) echo "powering off in 3 s"; (sync; sleep 3; poweroff) > /dev/null 2>&1 & ;;
+	*) echo "refused: the installer is busy: $(cat /www/state.txt 2>/dev/null)" ;;
+esac

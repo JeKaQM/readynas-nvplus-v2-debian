@@ -1,0 +1,15 @@
+#!/bin/sh
+# DHCP with the unit's own MAC (set from the device tree); fall back to @FALLBACK_IP@. Disk2 on = network up.
+[ "$1" = start ] || exit 0
+ip link set lo up
+ip link set eth0 up
+if udhcpc -i eth0 -n -q -t 10 -T 3 -x hostname:nvplus-installer -s /usr/share/udhcpc/default.script; then
+	echo dhcp > /run/netmode
+else
+	ip addr add @FALLBACK_IP@/24 dev eth0
+	ip route add default via @FALLBACK_GW@
+	echo "nameserver @FALLBACK_DNS@" > /etc/resolv.conf
+	echo static-fallback > /run/netmode
+fi
+echo default-on > "/sys/class/leds/status:blue:disk2_led/trigger" 2>/dev/null
+exit 0

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Read-only status pages on :80 (state.txt, status.txt, install.txt) and the thermal monitor.
+[ "$1" = start ] || exit 0
+touch /www/install.txt; echo "starting" > /www/state.txt
+/usr/sbin/httpd -p 80 -h /www
+start-stop-daemon -S -b -x /usr/sbin/nvplus-monitor
+exit 0

@@ -1,0 +1,2 @@
+name: NVPLUS_NAS
+desc: ReadyNAS NV+ v2 -> Debian 13 NAS: USB installer/rescue ramdisk, NAND boot initrd and the shared 6.12 kernel

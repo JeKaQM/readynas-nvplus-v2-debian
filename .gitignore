@@ -1,0 +1,5 @@
+# Per-unit settings (your MAC address) and local build output stay out of git (README section 7.1)
+site.conf
+recipe/site.conf
+build/
+*.zip

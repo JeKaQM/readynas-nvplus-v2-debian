@@ -1,0 +1,47 @@
+#!/bin/sh
+# NAND boot initrd of the ReadyNAS NV+ v2 Debian NAS (mtd "minirootfs", loaded by the stock U-Boot bootcmd).
+# Assembles the md arrays, checks and mounts LABEL=nasroot read-only and hands over to Debian's systemd.
+# If that fails it stays up with a read-only status page on http://<dhcp address>/ and never reboots by itself.
+PATH=/sbin:/bin:/usr/sbin:/usr/bin; export PATH
+mount -t proc proc /proc; mount -t sysfs sysfs /sys; mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /run /newroot /www; mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
+LOGF=/run/nvplus-boot.log
+log() { echo "nvplus-boot: $*" > /dev/kmsg; echo "$(cut -d' ' -f1 /proc/uptime) $*" >> $LOGF; }
+led() { echo "$2" > "/sys/class/leds/status:blue:$1_led/trigger" 2>/dev/null; }
+fan() { for d in /sys/class/hwmon/hwmon*; do [ "$(cat "$d/name" 2>/dev/null)" = g762 ] && { echo 1 > "$d/pwm1_enable"; echo "$1" > "$d/pwm1"; }; done; }
+
+rescue() {
+	log "RESCUE: $*"
+	for n in disk1 disk2 disk3 disk4; do led $n timer; done
+	fan 128	# 50 %, no temperature control in the rescue page
+	ip link set lo up; ip link set eth0 up
+	udhcpc -i eth0 -n -q -t 10 -T 3 -x hostname:nvplus-rescue -s /usr/share/udhcpc/default.script >/dev/null 2>&1 ||
+		{ ip addr add @FALLBACK_IP@/24 dev eth0; ip route add default via @FALLBACK_GW@; }
+	echo '<html><head><meta http-equiv="refresh" content="0;url=status.txt"></head></html>' > /www/index.html
+	httpd -p 80 -h /www
+	while :; do
+		{ echo "ReadyNAS NV+ v2: Debian did not start: $*"; echo "(boot initrd, $(date -u '+%F %T UTC'), uptime $(cut -d' ' -f1 /proc/uptime)s)"
+		  echo; cat $LOGF; echo; echo "== /proc/mdstat"; cat /proc/mdstat; echo; echo "== blkid"; blkid
+		  echo; echo "== dmesg"; dmesg | tail -200; } > /www/status.tmp 2>&1
+		mv /www/status.tmp /www/status.txt
+		sleep 30
+	done
+}
+
+log "start, kernel $(uname -r)"
+fan 102	# 40 %; Debian's nvplus-fan takes over
+# count only the internal SATA disks: a USB stick left in the front port must not make us start the arrays early
+sata() { n=0; for b in /sys/block/sd*; do case "$(readlink -f "$b")" in */f1080000.sata/*) n=$((n + 1)) ;; esac; done; echo $n; }
+i=0; while [ "$(sata)" -lt 4 ] && [ $i -lt 30 ]; do sleep 1; i=$((i + 1)); done
+sleep 1
+log "$(sata) SATA disks after ${i}s: $(ls /sys/block | grep '^sd' | tr '\n' ' ')"
+mdadm --assemble --scan --run >> $LOGF 2>&1
+cat /proc/mdstat >> $LOGF
+root=$(findfs LABEL=nasroot 2>/dev/null) || rescue "no filesystem labelled nasroot (RAID not assembled?)"
+e2fsck -p "$root" >> $LOGF 2>&1; rc=$?
+[ $rc -lt 4 ] || rescue "e2fsck -p $root exited $rc: needs a manual fsck"
+mount -t ext4 -o ro "$root" /newroot >> $LOGF 2>&1 || rescue "cannot mount $root"
+[ -e /newroot/usr/lib/systemd/systemd ] || rescue "no systemd on $root"
+log "switching to Debian on $root"
+mount --move /dev /newroot/dev; mount --move /proc /newroot/proc; mount --move /sys /newroot/sys; mount --move /run /newroot/run
+exec switch_root /newroot /sbin/init

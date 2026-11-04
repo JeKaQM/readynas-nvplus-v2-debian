@@ -1,0 +1,4 @@
+#!/bin/sh
+[ "$1" = start ] || exit 0
+start-stop-daemon -S -b -x /usr/sbin/nas-install
+exit 0
