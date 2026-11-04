@@ -3,16 +3,18 @@
 > [!CAUTION]
 > **Experimental. This can brick your NAS and will destroy all data on its disks.**
 >
-> * This guide and recipe are an **experimental personal project**, tested on **a single unit**. Your
->   hardware revision, firmware, bootloader settings or disks may differ in ways that were never tested.
+> * This is an **experimental hobby project**, tested on **a single unit**. Your hardware revision,
+>   firmware, bootloader settings or disks may differ in ways that were never tested.
 > * Following it **erases all four disks** and **replaces software in the NAS's flash memory**. A mistake, a bug,
 >   an untested difference in your unit or a power cut at the wrong moment can leave the device **unbootable
 >   ("bricked")**. Recovering it may need a serial console, specialist tools, or may not be possible at all.
 > * **Verify every fact, address, command and file yourself before you act on it.** Do not rely on this guide
 >   alone, and do not continue past any step you do not fully understand.
-> * Everything here is provided **"as is", without warranty of any kind**. **The author accepts no
->   responsibility or liability** for bricked devices, lost data, hardware damage or any other consequence of
->   using this guide or its files. **You use it entirely at your own risk.**
+> * **There is no warranty for anything here.** As a hobby project, everything is provided **"as is"**: no
+>   guarantee that the information is correct or complete, that the files work, that the results are safe, and
+>   no promise of support or updates. **The author accepts no responsibility or liability** for bricked
+>   devices, lost data, hardware damage or any other consequence of using this guide or its files.
+>   **You use it entirely at your own risk.**
 > * This project is not affiliated with, endorsed or supported by NETGEAR.
 
 **Turn an end-of-life ReadyNAS NV+ v2 into a current Debian 13 NAS with a modern Linux kernel, SSH, a web
@@ -21,7 +23,7 @@ touching the bootloader.**
 
 | | |
 |---|---|
-| Status | **Experimental.** Worked on one unit (November 2026); not tested anywhere else. |
+| Status | **Experimental hobby project, no warranty.** Worked on one unit (November 2026); not tested anywhere else. |
 | Result | Debian 13.7 "trixie" (armel), Linux 6.12.115 LTS (own build), Webmin 2.670, Samba 4.22, NFS, mdadm 4.4 |
 | Bootloader | NETGEAR's U-Boot is never modified. Recovery by USB stick always remains possible. |
 | Destructive | **Yes. All four disks are erased.** Back up your data first. |
@@ -814,9 +816,11 @@ timestamps).
 
 NETGEAR and ReadyNAS are trademarks of NETGEAR, Inc. This project is independent and not affiliated with or
 endorsed by NETGEAR. It replaces the vendor firmware, writes to the device's flash memory and erases all
-disks. It is experimental and may brick your device. It is provided "as is", without warranty of any kind
-(see the licence), and the author accepts no responsibility or liability for any damage, data loss or other
-consequence of its use. Verify everything yourself first, and keep your data backed up.
+disks. It is an experimental hobby project and may brick your device. There is no warranty for anything in
+it: the information, files and results are provided "as is" (see the licence), with no guarantee of
+correctness, fitness for any purpose, support or updates, and the author accepts no responsibility or
+liability for any damage, data loss or other consequence of its use. Verify everything yourself first, and
+keep your data backed up.
 
 ### Feedback and other units
 
