@@ -380,7 +380,8 @@ heartbeat, Disk 2 on, and a status page on `http://<nas>/` saying "rescue mode".
 ### 7.1 Build the images
 
 ```sh
-git clone <this project> readynas && cd readynas/recipe     # or copy the recipe folder
+git clone https://github.com/JeKaQM/readynas-nvplus-v2-debian.git
+cd readynas-nvplus-v2-debian/recipe
 
 cp site.conf.example site.conf
 $EDITOR site.conf            # UNIT_MAC = your NAS's MAC; FALLBACK_* = used only if DHCP fails
@@ -744,6 +745,7 @@ md127 : active raid5 sdb3[0] sde3[4] sdd3[2] sdc3[1]
 
 ```
 README.md                  this guide
+LICENSE                    MIT (kernel patches: GPL-2.0, see section 13)
 recipe/                    Buildroot external tree + helper scripts (tested; site values are placeholders)
   site.conf.example        your MAC and fallback network settings
   prepare.sh               fills site.conf into a build copy (refuses example values)
@@ -783,6 +785,24 @@ timestamps).
 * NETGEAR's RAIDiator 5.3.13 firmware was only downloaded from NETGEAR and analysed; nothing from it is
   redistributed here.
 
-Licensing: the kernel patches in `recipe/patches/linux/` modify GPL-2.0 code and are GPL-2.0. Choose a licence
-for the rest of the recipe before publishing (a permissive one such as MIT suits scripts like these).
-Third-party software keeps its own licence.
+### Licence
+
+* This guide and the recipe (scripts, configuration, Buildroot tree) are released under the
+  [MIT licence](LICENSE).
+* **Exception:** the kernel patches in `recipe/patches/linux/` modify the Linux kernel and are therefore
+  licensed under **GPL-2.0**, like the kernel itself.
+* Everything the build downloads (Linux, Buildroot, BusyBox, Debian, Webmin, …) keeps its own licence.
+  Nothing from NETGEAR's firmware is included in this repository.
+
+### Trademarks and warranty
+
+NETGEAR and ReadyNAS are trademarks of NETGEAR, Inc. This project is independent and not affiliated with or
+endorsed by NETGEAR. It replaces the vendor firmware and erases all disks; there is no warranty of any kind
+(see the licence). Keep your data backed up.
+
+### Feedback and other units
+
+Tried it on your NV+ v2, or adapted it to a Duo v2 or another Kirkwood box? Please open an issue with the
+model, the stock firmware and U-Boot versions, and the installer log (`nas-install/logs/` on the stick;
+remove anything private first). Failed runs are as useful as successful ones: section 10 lists what has to be
+verified for each new model.
