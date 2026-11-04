@@ -1,0 +1,13 @@
+[Unit]
+Description=ReadyNAS NV+ v2 front panel (LCD status pages, buttons, disk LEDs)
+After=systemd-modules-load.service local-fs.target
+
+[Service]
+ExecStartPre=-/usr/sbin/modprobe hd44780
+ExecStart=/usr/local/sbin/nvplus-lcd
+Restart=always
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

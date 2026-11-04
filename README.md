@@ -25,7 +25,7 @@ touching the bootloader.**
 |---|---|
 | Status | **Experimental hobby project, no warranty.** Worked on one unit (November 2026); not tested anywhere else. |
 | Result | Debian 13.7 "trixie" (armel), Linux 6.12.115 LTS (own build), Webmin 2.670, Samba 4.22, NFS, mdadm 4.4 |
-| Bootloader | NETGEAR's U-Boot is never modified. Recovery by USB stick always remains possible. |
+| Bootloader | NETGEAR's U-Boot is never modified. USB recovery worked on this unit; it is not guaranteed. |
 | Destructive | **Yes. All four disks are erased.** Back up your data first. |
 | Time | Build 10–30 min (first time, depends on your PC), install about 40 min, plus a background RAID build of many hours |
 | Skill level | Comfortable with a Linux shell. No soldering, no serial cable. |
@@ -68,13 +68,14 @@ runs:
 | Windows/macOS shares | Samba 4.22 (SMB2/3), `wsdd2` (Windows network discovery), Avahi (`<hostname>.local`) | ports 139/445 |
 | Unix shares | NFS server (v3/v4) | port 2049 |
 | Storage | Linux md RAID: mirrored root and swap on all four disks, RAID5 (or 6/10) data array, ext4 | `/srv/data` |
-| Monitoring | smartd (scheduled self-tests), mdadm monitor, hardware watchdog, persistent journal | |
+| Monitoring | smartd (scheduled self-tests), mdadm monitor, persistent journal; hardware watchdog disabled | |
 | Fan | Quiet temperature-controlled fan service (30–50 %, full speed only when hot) | |
+| Front panel | Rotating LCD status, ten-minute sleep, wake-only first button press, RAID/warning LEDs | `nvplus-lcd` |
 
-What stays the same: the blue LEDs, the four hot-swap bays and the Gigabit port. The Power button is wired to
-Linux as a power key and the board's power-off GPIO is driven by the kernel, so a short press should make
-systemd shut down cleanly and switch the unit off (systemd-logind's default; not yet tested on the unit;
-`systemctl poweroff` is the tested way). The front 2-line LCD is not used.
+The original blue LEDs, four bays, Gigabit port, 2×16 LCD and GPIO buttons are used. The LCD and demo
+were confirmed on the real unit. The panel's button timing is software-tested; physical button-triggered
+shutdown/reboot and the new idle/wake behaviour still need owner confirmation. `systemctl poweroff`
+is the previously tested shutdown route. See [Front-panel controls](#85-front-panel-controls-and-display-sleep).
 
 ---
 
@@ -92,7 +93,7 @@ systemd shut down cleanly and switch the unit off (systemd-logind's default; not
 | Sensors / control | GMT G762 fan controller (I²C 0x3e), Ricoh RS5C372A RTC (I²C 0x32), SoC thermal sensor |
 | Buttons | Power (GPIO 47), Backup (GPIO 45), Reset (GPIO 13) |
 | LEDs | Power (GPIO 31), Backup (22), Disk 1–4 (20, 23, 24, 29), all active-low; power-off GPIO 30 |
-| Display | HD44780 2×16 character LCD on GPIOs (not used here) |
+| Display | HD44780 2×16 character LCD on GPIOs, Linux `hd44780`/`charlcd` modules |
 | Stock firmware | RAIDiator 5.3.13: Linux 2.6.31.8, Debian squeeze userland, X-RAID2 (md + LVM) on the disks |
 | Bootloader | U-Boot 1.1.4 (Feb 6 2012), Marvell version 3.4.27, NETGEAR version `Uboot-1_1_4-NetgearNV+V4-V1008` |
 
@@ -294,7 +295,8 @@ The root mirror survives the loss of any three disks; RAID5 data survives one fa
 | `nvplus-fan` | | `/usr/local/sbin/nvplus-fan` |
 | `systemd-networkd` + `-resolved` + `-timesyncd` | | `/etc/systemd/network/10-nas-lan.network` (DHCP, MAC client ID) |
 | `unattended-upgrades` | | `/etc/apt/apt.conf.d/20auto-upgrades` |
-| hardware watchdog | | systemd `RuntimeWatchdogSec=15s` |
+| `nvplus-lcd` | | LCD pages, 600 s idle timeout, GPIO buttons and RAID LEDs |
+| hardware watchdog | | **Disabled**: `RuntimeWatchdogSec=off`, `RebootWatchdogSec=off`, `KExecWatchdogSec=off` (see section 8.5) |
 
 ### 4.4 Files on the NAS that make it work
 
@@ -303,8 +305,11 @@ The root mirror survives the loss of any three disks; RAID5 data survives one fa
 | `/usr/local/sbin/nvplus-nand` | Back up, check and write the kernel/initrd flash partitions (section 8.4) |
 | `/usr/local/share/nvplus/` | Copies of the installed `uImage-nas` and `uInitrd-nas`, checksums, README |
 | `/usr/local/sbin/nvplus-fan`, `/etc/systemd/system/nvplus-fan.service` | Fan control |
-| `/etc/modules-load.d/nvplus.conf` | Loads `drivetemp` (disk temperatures for the fan) |
-| `/etc/systemd/system.conf.d/nas-watchdog.conf` | Hardware watchdog |
+| `/etc/modules-load.d/nvplus.conf` | Loads `drivetemp` and `hd44780` (with `hd44780_common`/`charlcd` dependencies) |
+| `/usr/local/sbin/nvplus-lcd`, `/etc/systemd/system/nvplus-lcd.service` | LCD, buttons, disk and warning LEDs |
+| `/usr/local/bin/lcd-show` | Optional demo; pauses panel LCD writes, then restores status pages |
+| `/etc/systemd/logind.conf.d/nvplus-buttons.conf` | Prevents logind from treating wake/short presses as shutdown or reboot |
+| `/etc/systemd/system.conf.d/nas-watchdog.conf` | Disables the unsafe short hardware watchdog |
 | `/etc/systemd/journald.conf.d/nas.conf` | Persistent journal, 64 MB cap |
 | `/etc/sysctl.d/90-nas.conf` | Memory tuning for 256 MiB |
 | `/etc/nvplus-release` | When and how this system was installed |
@@ -522,7 +527,7 @@ cat /proc/mdstat                            # md125/126 [4/4] [UUUU]; data array
 grep -c '^ARRAY' /etc/mdadm/mdadm.conf      # 3
 df -h / /srv/data
 systemctl --failed                          # nothing listed
-for s in ssh smbd nmbd wsdd2 nfs-server avahi-daemon smartmontools webmin nvplus-fan; do
+for s in ssh smbd nmbd wsdd2 nfs-server avahi-daemon smartmontools webmin nvplus-fan nvplus-lcd; do
     printf '%s=%s ' $s $(systemctl is-active $s); done; echo
 journalctl -u nvplus-fan -b -o cat | tail -3          # e.g. "pwm 77 (30 %), hottest disk 30 C ..."
 cat /run/nvplus-boot.log                    # boot initrd: 4 SATA disks, switch_root after ~8 s
@@ -588,6 +593,58 @@ images back; the installed `/usr/local/share/nvplus/` copies are the ones that w
 
 ---
 
+### 8.5 Front-panel controls and display sleep
+
+`nvplus-lcd` rotates pages every five seconds: hostname/address, RAID health/rebuild progress and ETA,
+space, four disk temperatures, CPU/fan/load/uptime, RAM/swap, network rates and clock. **After ten minutes
+without front-button activity, both text rows blank and the backlight switches off.** Page changes,
+rebuild progress and warnings do not reset that timer. Monitoring and warning LEDs remain active.
+
+**Any front-button press, including Power, wakes the display. The entire first press is wake-only, even
+if held down:** release it, then press again to operate the panel. This avoids a wake press shutting down
+or rebooting the NAS. A new ten-minute timeout starts after button activity. `lcd-show` wakes the LCD for
+its demo, gives it exclusive access, then restores the status pages and a fresh ten-minute timeout.
+
+| Button (display already awake) | Tap | Hold |
+|---|---|---|
+| Backup | Next page; pause rotation for 30 s | 2 s: blank the display/backlight now |
+| Reset | Network page | 5 s: reboot; countdown, release early to cancel |
+| Power | Show shutdown hint | 2 s: clean shutdown; countdown, release early to cancel |
+
+The provided logind drop-in ignores its own Power/Reset actions so a wake press cannot also invoke
+logind's default shutdown. If the panel is unavailable, use SSH/Webmin for a clean shutdown rather than
+assuming these custom button actions still work. Bootloader/USB-recovery button behaviour is unchanged.
+
+Disk LEDs use SATA port-multiplier identity, **not sdX order**: solid for in-sync members, blinking while
+rebuilding, off for absent/faulty members. The mapping was compared with stock UI slots; physical front
+bay-label order still needs independent confirmation. Backup LED warning blink continues while the
+screen sleeps (degraded/failed storage, missing volume, hot hardware, full volume, stopped fan or failed
+services). These indicators do not replace proper monitoring or backups.
+
+**Watchdog safety:** an earlier `RuntimeWatchdogSec=15s` caused a hard reset when a systemd reload on
+this slow, memory-constrained NAS exceeded the watchdog deadline during a RAID rebuild. The hardware
+maximum is only about 21 s. The Debian recipe now disables both runtime and reboot hardware watchdogs;
+**do not re-enable them just to match the original guide.** Kernel panic reboot after ten seconds remains,
+but a complete kernel/userspace hang may now require manual power recovery. The installer/rescue recipe also stops auto-arming its old BusyBox hardware watchdog;
+incremental builds remove only the previous exact inittab entry. No systemd manager reload or NAS reboot is required for a panel-program
+only update when the driver, unit, logind drop-in and disabled watchdog are already installed.
+
+Software tests (no LCD, GPIO, systemctl or power writes):
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+They exercise the 600 s boundary, all three wake-only presses/holds, subsequent deliberate actions,
+cancellation, demo coexistence and continuing warning checks. Passing them is **not** a physical button
+or display test. Test sleep/wake first; do not deliberately reboot during an active RAID rebuild merely
+to test a button. LCD modules must match the running kernel exactly; rebuild with this recipe rather than
+using a module compiled for a different kernel/configuration/symbol versions. `prepare.sh` creates a copy:
+use a fresh prepared tree and clean kernel build after changing the LCD fragment; stale module archives
+without all three LCD drivers are rejected. New installs enable `nvplus-lcd` and install Python 3.
+
+---
+
 ## 9. Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -612,6 +669,8 @@ images back; the installed `/usr/local/share/nvplus/` copies are the ones that w
 | `pam_env: Unable to open env file /etc/default/locale`, Perl locale warnings | No locale configured; your SSH client sends its `LANG` | Section 7.4 step 5 |
 | Webmin very slow, high load, swapping, RAID build crawling | The Authentic theme on 256 MiB | Section 7.4 step 2; consider the Gray theme |
 | `stats.pl` uses about 25 MB | Authentic's live statistics helper, started when the dashboard or side panel is open | Close the dashboard; the real-time setting in 7.4 reduces it |
+| LCD dark after ten minutes | Normal idle sleep | Press any front button once to wake; release and press again for actions |
+| Unexpected hard reboot during systemd reload | An old 15 s runtime watchdog | Keep runtime/reboot hardware watchdog disabled; see section 8.5 |
 | Fan loud for the first 10–15 s after Power | The bootloader/fan chip default before Linux runs | Normal; Linux takes over and drops to 40 %, then Debian to 30–50 % |
 | Fan log says `no RPM at pwm …, raising the minimum` | This fan stalls at very low duty | Automatic; the minimum is raised in 5 % steps |
 | Disk names differ between boots (`sda` vs `sdb`) | A USB stick enumerated first | Normal. Everything uses labels/UUIDs |
@@ -775,7 +834,7 @@ recipe/                    Buildroot external tree + helper scripts (tested; sit
     overlay-bootrd/          flash boot initrd: /init, mdadm.conf
     common/nvplus-nand       flash backup/check/write tool (installer and installed system)
   patches/linux/           0001 LED boot checkpoints, 0002 device tree (MAC, read-only env, LED pinmux)
-  debian-overlay/          files placed into Debian (network, fan, watchdog, Samba, smartd, README, …)
+  debian-overlay/          files placed into Debian (network, fan, LCD/buttons/demo, disabled watchdog, Samba, smartd, README, …)
   stick/                   nas-install.conf, README.txt, hooks/README.txt for the stick
 ```
 
@@ -787,7 +846,7 @@ reproduce the tested files exactly.
 Validation of the published recipe: running `prepare.sh`, `fetch-payload.sh` and `build.sh` exactly as above
 in an empty directory (8 minutes on a 16-core PC with a warm download cache) produced the same stick layout,
 an identical kernel configuration and device tree blob, byte-identical installer and boot-initrd scripts, the
-same 115 modules and identical Debian/Webmin payloads. Image sizes differed by a few hundred bytes (build
+same 115 modules at that time (before adding the LCD modules) and identical Debian/Webmin payloads. Image sizes differed by a few hundred bytes (build
 timestamps).
 
 ---

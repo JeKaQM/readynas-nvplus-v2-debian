@@ -1,0 +1,44 @@
+#!/bin/bash
+# MIT licensed. A ~30 s demo for the ReadyNAS NV+ v2 HD44780 LCD.
+set -e
+L=/dev/lcd
+[ -w "$L" ] || { echo "lcd-show: $L not writable (hd44780 loaded? root?)"; exit 1; }
+# Serialise demos and let the panel keep monitoring without touching the display.
+exec 9>/run/nvplus-lcd-demo.lock
+flock -n 9 || { echo 'lcd-show: a demo is already running'; exit 1; }
+cleanup() { sleep 4; rm -f /run/nvplus-lcd.pause; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+touch /run/nvplus-lcd.pause
+sleep 1.5
+at() { printf '\033[Lx%dy%d;' "$1" "$2" > "$L"; }
+defc() { printf '\033[LG%d%s;' "$1" "$2" > "$L"; }
+defc 0 0e1f151f0e0a0000
+defc 1 000a1f1f0e040000
+defc 2 1010101010101010
+defc 3 1818181818181818
+defc 4 1c1c1c1c1c1c1c1c
+defc 5 1e1e1e1e1e1e1e1e
+defc 6 1f1f1f1f1f1f1f1f
+defc 7 000a0a00110e0000
+printf '\033[Lc\033[Lb\033[L+' > "$L"
+for n in 3 2 1; do printf '\f  Get ready...\n       %s' "$n" > "$L"; sleep 1; done
+printf '\f\000 RAIDiator   \000\n   R.I.P. 2012' > "$L"; sleep 3
+printf '\fResurrecting...' > "$L"
+for i in $(seq 0 80); do
+    s=''
+    for ((j=0; j<i/5; j++)); do s="$s\\006"; done
+    p=$((i % 5)); if [ "$p" -gt 0 ]; then s="$s\\00$((p + 1))"; fi
+    at 0 1; printf '%b' "$s" > "$L"; sleep 0.04
+done
+sleep 0.5
+printf "\f  IT'S ALIVE!!!\n \001  \001  \001  \001  \001" > "$L"
+for k in 1 2 3 4 5 6; do printf '\033[L-' > "$L"; sleep 0.2; printf '\033[L+' > "$L"; sleep 0.2; done
+printf '\f\007 NAS reborn \007' > "$L"
+msg='Debian 13 + Linux 6.12 on a 2012 NAS ... not bad for e-waste!   '
+for ((k=0; k<${#msg}; k++)); do
+    at 0 1
+    doubled="$msg$msg"; printf '%s' "${doubled:k:16}" > "$L"; sleep 0.2
+done
+printf '\f\001 NV+ v2 REBORN\nDebian 13 \007 6.12' > "$L"

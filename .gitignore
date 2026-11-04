@@ -3,3 +3,7 @@ site.conf
 recipe/site.conf
 build/
 *.zip
+
+__pycache__/
+*.py[cod]
+.test-tmp/
